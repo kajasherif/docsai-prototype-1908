@@ -269,7 +269,49 @@ const FILES_BY_AGENT = {
   agt_kyc_verify:        ['passport-scan-771.jpg','nric-front-882.png','proof-address-118.pdf'],
   agt_euratek_report:    ['service-report-8812.pdf'],
   agt_insurance_claim:   ['claim-form-2210.pdf','damage-photos-2210.pdf'],
+  agt_recon_card:        ['sales-report-18aug.xlsx','mastercard-settlement-18aug.pdf'],
 };
+
+/* ---- Agent type ----------------------------------------------------------
+   The type is chosen first when creating an agent. It decides which Configure
+   form the builder shows and which Workbench the agent's workspace renders. */
+const AGENT_TYPES = [
+  { id:'reconciliation', title:'Reconciliation', icon:'arrow-left-right', color:'#f05742',
+    blurb:'Match records across two documents and surface everything that does not reconcile.',
+    example:'A daily sales report against the card settlement or bank statement.',
+    workbench:'Matching workbench' },
+  { id:'claims', title:'Claims', icon:'clipboard-plus', color:'#3b82f6',
+    blurb:'Read a claim pack, pull the claim and policy detail, and recommend a coverage decision.',
+    example:'Medical referrals, motor and property claim forms with supporting evidence.',
+    workbench:'Claims queue' },
+  { id:'invoice-validator', title:'Invoice Validator', icon:'receipt', color:'#10b981',
+    blurb:'Capture invoice fields, check the arithmetic and the business rules, then post or hold.',
+    example:'Supplier tax invoices going into accounts payable.',
+    workbench:'Validation queue' },
+  { id:'custom', title:'Custom', icon:'sparkles', color:'#a855f7',
+    blurb:'Describe what you need in plain language and let the platform draft the pipeline.',
+    example:'Anything the three templates above do not already cover.',
+    workbench:'Extraction results' },
+];
+const AGENT_TYPE = Object.fromEntries(AGENT_TYPES.map(t => [t.id, t]));
+
+const AGENT_TYPE_BY_ID = {
+  agt_tecksang_inv:'invoice-validator', agt_fongs_3way:'invoice-validator',
+  agt_saneforce_pharma:'invoice-validator',
+  agt_par3_referral:'claims', agt_insurance_claim:'claims',
+  agt_recon_settlement:'reconciliation', agt_recon_card:'reconciliation',
+  agt_pac_lease:'custom', agt_multitrans_bol:'custom', agt_kyc_verify:'custom',
+  agt_euratek_report:'custom',
+};
+
+AGENTS.push({
+  id:'agt_recon_card', name:'retail_card_settlement_recon', display:'Retail Card Settlement Recon',
+  description:'Match the daily POS sales report against the Mastercard settlement file with a T+2 window.',
+  useCase:'data-validation', category:'Finance', industry:'Retail', status:'published', version:2,
+  trigger:'schedule', created:'2026-06-12', updated:'2026-08-18', steps:14, ocr:'Azure Document Intelligence',
+  model:'gpt-4o-mini', hitl:true, fields:9,
+});
+AGENTS.forEach(a => { a.type = AGENT_TYPE_BY_ID[a.id] || 'custom'; });
 
 const REMARKS_OK = [
   'All fields extracted and validated successfully.',
@@ -521,6 +563,13 @@ const TEMPLATES = [
     steps:12, hitl:true, avgCredits:8.2 },
 ];
 
+/* Which agent type a template drops you into when you click "Use this template". */
+const TEMPLATE_TO_TYPE = {
+  reconciliation:'reconciliation', claim:'claims',
+  invoice:'invoice-validator', po3way:'invoice-validator',
+  contract:'custom', kyc:'custom', resume:'custom', bol:'custom',
+};
+
 const RECIPES = [
   { id:'retail-card', industry:'Retail', sub:'F&B / QSR', tolDays:3,
     a:{ label:'Sales Report', fields:['Transaction Date','Transaction ID','Terminal / Outlet','Sales Amount'] },
@@ -733,9 +782,11 @@ const STATS = (() => {
     totalAgents: AGENTS.length,
     activeAgents: AGENTS.filter(a => a.status === 'published').length,
     total30: total, completed30: succeeded, failed30: failed, review30: review,
-    successRate: +(succeeded / total * 100).toFixed(1),
-    stpRate: +(straightThrough / total * 100).toFixed(1),
-    hitlRate: +(review / total * 100).toFixed(1),
+    // kept as fixed-1 strings so a rate never renders as "87%" on one screen
+    // and "86.2%" on another
+    successRate: (succeeded / total * 100).toFixed(1),
+    stpRate: (straightThrough / total * 100).toFixed(1),
+    hitlRate: (review / total * 100).toFixed(1),
     runningNow: RUNS.filter(r => r.status === 'RUNNING').length,
     pendingReview: REVIEWS.length,
     pages30: pages, credits30: credits, spend30: +(credits * 0.01).toFixed(2),
@@ -754,7 +805,7 @@ const NAV = [
   ]},
   { group:'Build', items:[
     { icon:'workflow',         label:'Agents',        route:'/agents' },
-    { icon:'wand-2',           label:'Agent Builder', route:'/builder' },
+    { icon:'wand-2',           label:'Create Agent',  route:'/builder' },
     { icon:'layout-template',  label:'Templates',     route:'/templates' },
     { icon:'git-branch',       label:'Orchestration', route:'/orchestration' },
   ]},
@@ -763,9 +814,6 @@ const NAV = [
     { icon:'upload',           label:'Upload & Execute', route:'/upload' },
     { icon:'history',          label:'Run History',      route:'/runs' },
     { icon:'user-check',       label:'Review Queue',     route:'/review', badgeKey:'reviews' },
-  ]},
-  { group:'Solutions', items:[
-    { icon:'arrow-left-right', label:'Reconciliation', route:'/reconciliation' },
   ]},
   { group:'Connect', items:[
     { icon:'plug',             label:'Connectors', route:'/connectors' },
@@ -780,9 +828,11 @@ const NAV = [
 ];
 
 const STATE = {
-  agentSearch:'', agentStatus:'all', agentCategory:'all',
+  agentSearch:'', agentStatus:'all', agentType:'all',
   runSearch:'', runStatus:'all', runMode:'LIVE', runFiltersOpen:false, runPage:0,
-  builderStep:0, builderOp:'extraction', builderView:'form',
+  builderStage:0, builderType:null, builderRecipe:'retail-card',
+  builderPreview:'summary', builderGenerated:false, builderTestState:null, builderTestPct:0,
+  wsTab:'overview',
   templateOpen:null, recipeOpen:'retail-card',
   playAgent:'agt_tecksang_inv', playRunning:false, playConfigs:null, playTick:0,
   reviewOpen:null, reviewSearch:'',
@@ -970,7 +1020,8 @@ function yamlHi(src) {
 const SCREENS = {};
 const TITLES = {
   '/login':'Sign in', '/dashboard':'Dashboard', '/analytics':'Analytics', '/agents':'Agents',
-  '/builder':'Agent Builder', '/templates':'Use Case Templates', '/orchestration':'Orchestration',
+  '/agent':'Agent workspace',
+  '/builder':'Creating an Agent', '/templates':'Use Case Templates', '/orchestration':'Orchestration',
   '/playground':'Agent Playground', '/upload':'Upload & Execute', '/runs':'Run History',
   '/run':'Run Detail', '/review':'Review Queue', '/reconciliation':'Reconciliation',
   '/connectors':'Connectors', '/teams':'Team Members', '/roles':'Roles & Permissions',
@@ -978,7 +1029,8 @@ const TITLES = {
 };
 const CRUMBS = {
   '/dashboard':['Overview','Dashboard'], '/analytics':['Overview','Analytics'],
-  '/agents':['Build','Agents'], '/builder':['Build','Agents','Agent Builder'],
+  '/agents':['Build','Agents'], '/agent':['Build','Agents','Workspace'],
+  '/builder':['Build','Agents','Creating an Agent'],
   '/templates':['Build','Templates'], '/orchestration':['Build','Orchestration'],
   '/playground':['Operate','Playground'], '/upload':['Operate','Upload & Execute'],
   '/runs':['Operate','Run History'], '/run':['Operate','Run History','Run Detail'],
@@ -1003,7 +1055,7 @@ function placeholder(name) {
 function openPalette() {
   const items = [];
   NAV.forEach(g => g.items.forEach(it => items.push({ kind:'Page', label:it.label, sub:g.group, icon:it.icon, route:it.route })));
-  AGENTS.forEach(a => items.push({ kind:'Agent', label:a.display, sub:a.category + ' · ' + AGENT_STATUS[a.status].label, icon:'workflow', route:'/agents' }));
+  AGENTS.forEach(a => items.push({ kind:'Agent', label:a.display, sub:AGENT_TYPE[a.type].title + ' · ' + AGENT_STATUS[a.status].label, icon:AGENT_TYPE[a.type].icon, route:'/agent/' + a.id }));
   RUNS.slice(0, 12).forEach(r => items.push({ kind:'Run', label:r.runId, sub:r.agentName, icon:'history', route:'/run/' + r.runId }));
 
   const render = (q) => {
@@ -1042,8 +1094,9 @@ function openPalette() {
    6. SIDEBAR + ROUTER
 ------------------------------------------------------------------ */
 function renderSidebar(activeBase) {
-  // run detail lives under Run History in the nav
-  const active = activeBase === '/run' ? '/runs' : activeBase;
+  // Detail routes highlight the list they belong to.
+  const ALIAS = { '/run':'/runs', '/agent':'/agents' };
+  const active = ALIAS[activeBase] || activeBase;
   const badges = { reviews: REVIEWS.length };
   $('#sidebar-nav').innerHTML = NAV.map(group => `
     <li class="pt-2 first:pt-0">
@@ -1081,9 +1134,13 @@ function currentRoute() {
 function router() {
   destroyCharts();
   closeModal();
-  const route = currentRoute();
-  const base = '/' + route.split('/')[1];
+  let route = currentRoute();
+  let base = '/' + route.split('/')[1];
   const shell = $('#app-shell');
+
+  // Reconciliation is an agent type, not a standalone module. Old links land on
+  // the reconciliation agent's workbench instead of 404-ing.
+  if (base === '/reconciliation') { location.replace('#/agent/agt_recon_settlement/workbench'); return; }
 
   if (base === '/login') {
     shell.classList.add('hidden');
@@ -1332,7 +1389,7 @@ AFTER['/dashboard'] = () => {
 function filteredAgents() {
   return AGENTS.filter(a => {
     if (STATE.agentStatus !== 'all' && a.status !== STATE.agentStatus) return false;
-    if (STATE.agentCategory !== 'all' && a.category !== STATE.agentCategory) return false;
+    if (STATE.agentType !== 'all' && a.type !== STATE.agentType) return false;
     if (STATE.agentSearch) {
       const q = STATE.agentSearch.toLowerCase();
       if (!(a.display + ' ' + a.name + ' ' + a.description + ' ' + a.category).toLowerCase().includes(q)) return false;
@@ -1346,157 +1403,109 @@ const TRIGGER_META = {
   schedule:  { label:'Schedule',  icon:'clock',     tone:'purple' },
 };
 
+function agentStats(a) {
+  const runs = RUNS.filter(r => r.agentId === a.id);
+  const seed = mulberry32(a.id.length * 977 + a.version * 31);
+  const monthly = runs.length * 47 + Math.floor(seed() * 260) + 120;
+  return {
+    runs, monthly,
+    success: +(89 + seed() * 10).toFixed(1),
+    credits: Math.round(monthly * (a.model === 'gpt-4o' ? 8.4 : 3.9)),
+    last: runs[0] || null,
+  };
+}
+
 SCREENS['/agents'] = () => {
   const rows = filteredAgents();
-  const cats = ['all', ...Array.from(new Set(AGENTS.map(a => a.category)))];
 
   return page(`
-    ${pageHeader('workflow','Agents','Build, publish and operate document agents across your business.',`
+    ${pageHeader('workflow','Agents','Every agent you have built, grouped by what it does. Open one to configure it, watch it work, or review what it flagged.',`
       <button class="btn-secondary" data-action="toast" data-msg="Agent list refreshed"><i data-lucide="rotate-cw" class="w-4 h-4"></i>Refresh</button>
       <button class="btn-secondary" data-agent-action="upload"><i data-lucide="upload" class="w-4 h-4"></i>Upload YAML</button>
-      <button class="btn-primary" data-action="nav" data-route="/builder"><i data-lucide="plus" class="w-4 h-4"></i>Create Agent</button>`)}
+      <button class="btn-primary" data-action="nav" data-route="/builder"><i data-lucide="plus" class="w-4 h-4"></i>Create an Agent</button>`)}
 
-    <div class="bg-white rounded-xl border border-gray-100 shadow-sm p-4 mb-4">
-      <div class="grid grid-cols-1 md:grid-cols-12 gap-3">
-        <div class="md:col-span-6">
-          <label class="block text-[11px] font-bold uppercase tracking-wider text-gray-400 mb-1.5">Search</label>
-          <div class="relative">
-            <i data-lucide="search" class="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
-            <input id="agent-search" class="input-field pl-9" placeholder="Search agents by name, description or category…" value="${esc(STATE.agentSearch)}" />
-          </div>
+    <div class="bg-white rounded-xl border border-gray-100 shadow-sm p-4 mb-5">
+      <div class="flex items-center gap-3 flex-wrap">
+        <div class="relative flex-1 min-w-[260px]">
+          <i data-lucide="search" class="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2"></i>
+          <input id="agent-search" class="input-field pl-9" placeholder="Search agents by name or description…" value="${esc(STATE.agentSearch)}" />
         </div>
-        <div class="md:col-span-3">
-          <label class="block text-[11px] font-bold uppercase tracking-wider text-gray-400 mb-1.5">Status</label>
-          <select id="agent-status" class="input-field">
-            <option value="all">All Statuses</option>
-            ${Object.entries(AGENT_STATUS).map(([k, v]) => `<option value="${k}" ${STATE.agentStatus === k ? 'selected' : ''}>${v.label}</option>`).join('')}
-          </select>
-        </div>
-        <div class="md:col-span-3">
-          <label class="block text-[11px] font-bold uppercase tracking-wider text-gray-400 mb-1.5">Agent Category</label>
-          <select id="agent-category" class="input-field">
-            ${cats.map(c => `<option value="${c}" ${STATE.agentCategory === c ? 'selected' : ''}>${c === 'all' ? 'All Categories' : c}</option>`).join('')}
-          </select>
-        </div>
+        <select id="agent-status" class="input-field !w-auto min-w-[170px]">
+          <option value="all">All Statuses</option>
+          ${Object.entries(AGENT_STATUS).map(([k, v]) => `<option value="${k}" ${STATE.agentStatus === k ? 'selected' : ''}>${v.label}</option>`).join('')}
+        </select>
+      </div>
+      <div class="flex items-center gap-2 flex-wrap mt-3.5 pt-3.5 border-t border-gray-50">
+        <span class="text-[11px] font-bold uppercase tracking-wider text-gray-400 mr-1">Type</span>
+        <button data-agent-type="all" class="px-3 py-1.5 rounded-lg text-[12px] font-semibold border transition ${STATE.agentType === 'all' ? 'bg-[#252525] text-white border-[#252525]' : 'bg-white border-gray-200 text-gray-600 hover:border-gray-300'}">
+          All <span class="opacity-60">${AGENTS.length}</span></button>
+        ${AGENT_TYPES.map(t => {
+          const n = AGENTS.filter(a => a.type === t.id).length;
+          const on = STATE.agentType === t.id;
+          return `<button data-agent-type="${t.id}" class="px-3 py-1.5 rounded-lg text-[12px] font-semibold border transition flex items-center gap-1.5 ${on ? 'text-white' : 'bg-white border-gray-200 text-gray-600 hover:border-gray-300'}"
+            style="${on ? 'background:' + t.color + ';border-color:' + t.color : ''}">
+            <i data-lucide="${t.icon}" class="w-3.5 h-3.5"></i>${t.title} <span class="opacity-60">${n}</span></button>`;
+        }).join('')}
       </div>
     </div>
 
-    ${card(`
-      <div class="overflow-x-auto">
-        <table class="dt w-full" style="min-width:1180px">
-          <thead class="bg-gray-50/80 border-b border-gray-100">
-            <tr>
-              <th class="text-left px-4 py-3 w-14">#</th>
-              <th class="text-left px-4 py-3">Agent Name</th>
-              <th class="text-left px-4 py-3">Description</th>
-              <th class="text-left px-4 py-3 w-32">Category</th>
-              <th class="text-left px-4 py-3 w-28">Trigger</th>
-              <th class="text-left px-4 py-3 w-28">Created</th>
-              <th class="text-left px-4 py-3 w-40">Status</th>
-              <th class="text-center px-4 py-3 w-32">Actions</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-gray-50">
-            ${rows.length ? rows.map((a, i) => {
-              const t = TRIGGER_META[a.trigger];
-              const canEdit = a.status === 'draft' || a.status === 'published' || a.status === 'wip';
-              return `<tr class="cursor-pointer" data-agent-row="${a.id}">
-                <td class="px-4 py-3 text-center text-gray-400 font-mono text-[12px]">${i + 1}</td>
-                <td class="px-4 py-3">
-                  <div class="font-semibold text-[13px] flex items-center gap-2">${esc(a.display)}
-                    ${pill('v' + a.version, 'gray')}
-                    ${a.hitl ? '<i data-lucide="user-check" class="w-3.5 h-3.5 text-orange-500" title="Human review gate"></i>' : ''}
-                  </div>
-                  <div class="text-[11px] text-gray-400 font-mono mt-0.5">${esc(a.name)}</div>
-                </td>
-                <td class="px-4 py-3 text-gray-600 max-w-[280px]"><div class="truncate" title="${esc(a.description)}">${esc(a.description)}</div></td>
-                <td class="px-4 py-3">${pill(a.category, 'gray')}</td>
-                <td class="px-4 py-3">${pill(`<i data-lucide="${t.icon}" class="w-3 h-3"></i>${t.label}`, t.tone)}</td>
-                <td class="px-4 py-3 text-gray-500 text-[12px]">${fmtDate(a.created)}</td>
-                <td class="px-4 py-3">${agentBadge(a.status)}</td>
-                <td class="px-4 py-3">
-                  <div class="flex items-center justify-center gap-1">
-                    <button class="p-1.5 rounded-lg hover:bg-gray-100 ${canEdit ? 'text-[#f05742]' : 'text-gray-300 cursor-not-allowed'}" ${canEdit ? 'data-action="nav" data-route="/builder"' : 'disabled'} title="${canEdit ? 'Edit agent' : 'Editing not available'}"><i data-lucide="pencil" class="w-4 h-4"></i></button>
-                    <button class="p-1.5 rounded-lg hover:bg-gray-100 ${a.status === 'published' ? 'text-[#f05742]' : 'text-gray-300 cursor-not-allowed'}" ${a.status === 'published' ? 'data-action="nav" data-route="/playground"' : 'disabled'} title="Test in playground"><i data-lucide="play" class="w-4 h-4"></i></button>
-                    <button class="p-1.5 rounded-lg hover:bg-red-50 text-gray-400 hover:text-red-500" data-agent-delete="${a.id}" title="Delete agent"><i data-lucide="trash-2" class="w-4 h-4"></i></button>
-                  </div>
-                </td>
-              </tr>`;
-            }).join('') : `<tr><td colspan="8" class="px-4 py-16 text-center">
-                <div class="w-14 h-14 rounded-2xl bg-gray-100 flex items-center justify-center mx-auto mb-3"><i data-lucide="file-question" class="w-6 h-6 text-gray-400"></i></div>
-                <div class="font-semibold text-gray-600">No agents match your filters</div>
-                <div class="text-[12px] text-gray-400 mt-1">Try clearing the search or status filter.</div></td></tr>`}
-          </tbody>
-        </table>
-      </div>
-      <div class="flex items-center justify-between px-4 py-3 border-t border-gray-100 text-[12px] text-gray-500">
-        <span>Showing <b>${rows.length}</b> of <b>${AGENTS.length}</b> agents</span>
-        <span class="flex items-center gap-2"><i data-lucide="info" class="w-3.5 h-3.5"></i>Click any row for the full configuration</span>
-      </div>`)}
+    ${rows.length ? `
+    <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+      ${rows.map(a => {
+        const t = AGENT_TYPE[a.type];
+        const tm = TRIGGER_META[a.trigger];
+        const st = agentStats(a);
+        return `<div class="group bg-white rounded-2xl border border-gray-100 shadow-sm p-5 hover-lift hover:border-[#f05742]/30 cursor-pointer flex flex-col" data-agent-card="${a.id}">
+          <div class="flex items-start justify-between gap-2 mb-3">
+            <div class="w-11 h-11 rounded-xl flex items-center justify-center shrink-0" style="background:${t.color}18">
+              <i data-lucide="${t.icon}" class="w-5 h-5" style="color:${t.color}"></i></div>
+            ${agentBadge(a.status)}
+          </div>
+
+          <div class="text-[15px] font-bold leading-tight">${esc(a.display)}</div>
+          <div class="text-[10.5px] text-gray-400 font-mono mt-0.5 truncate">${esc(a.name)}</div>
+
+          <div class="flex items-center gap-1.5 flex-wrap mt-2.5">
+            ${typeChip(a.type)} ${pill('v' + a.version, 'gray')}
+            ${pill(`<i data-lucide="${tm.icon}" class="w-3 h-3"></i>${tm.label}`, tm.tone)}
+            ${a.hitl ? pill('<i data-lucide="user-check" class="w-3 h-3"></i>HITL', 'amber') : ''}
+          </div>
+
+          <p class="text-[12px] text-gray-500 leading-relaxed mt-3 flex-1 line-clamp-2">${esc(a.description)}</p>
+
+          <div class="grid grid-cols-3 gap-2 mt-4 pt-3.5 border-t border-gray-50">
+            ${[['Runs / 30d', num(st.monthly)],['Success', st.success + '%'],['Credits', num(st.credits)]]
+              .map(([k, v]) => `<div><div class="text-[9.5px] font-bold uppercase tracking-wider text-gray-400">${k}</div>
+                <div class="text-[13px] font-bold mt-0.5">${v}</div></div>`).join('')}
+          </div>
+
+          <div class="flex items-center justify-between mt-3.5 pt-3 border-t border-gray-50">
+            <div class="flex items-center gap-2 text-[11px] text-gray-400 min-w-0">
+              ${st.last ? `<span class="step-dot ${RUN_STATUS[st.last.status].dot}"></span><span class="truncate">Last run ${ago(st.last.startedAt)}</span>`
+                        : '<span class="step-dot"></span><span>No runs yet</span>'}
+            </div>
+            <span class="text-[12px] font-semibold text-[#f05742] flex items-center gap-1 opacity-0 group-hover:opacity-100 transition shrink-0">
+              Open <i data-lucide="arrow-right" class="w-3.5 h-3.5"></i></span>
+          </div>
+        </div>`;
+      }).join('')}
+
+      <button class="rounded-2xl border-2 border-dashed border-gray-200 hover:border-[#f05742]/50 p-5 flex flex-col items-center justify-center text-center min-h-[220px] transition group" data-action="nav" data-route="/builder">
+        <div class="w-11 h-11 rounded-xl bg-gray-100 group-hover:bg-[#f05742]/10 flex items-center justify-center mb-3 transition">
+          <i data-lucide="plus" class="w-5 h-5 text-gray-400 group-hover:text-[#f05742] transition"></i></div>
+        <div class="text-[13.5px] font-semibold text-gray-600 group-hover:text-[#f05742] transition">Create an Agent</div>
+        <div class="text-[11.5px] text-gray-400 mt-1 max-w-[200px]">Reconciliation, Claims, Invoice Validator, or describe your own</div>
+      </button>
+    </div>`
+    : `${card(`<div class="py-20 text-center">
+        <div class="w-14 h-14 rounded-2xl bg-gray-100 flex items-center justify-center mx-auto mb-3"><i data-lucide="file-question" class="w-6 h-6 text-gray-400"></i></div>
+        <div class="font-semibold text-gray-600">No agents match your filters</div>
+        <div class="text-[12px] text-gray-400 mt-1">Try clearing the search, the type chips or the status filter.</div>
+      </div>`)}`}
+
+    <div class="mt-5 text-[12px] text-gray-500">Showing <b>${rows.length}</b> of <b>${AGENTS.length}</b> agents</div>
   `);
 };
-
-function agentDrawer(a) {
-  const t = TRIGGER_META[a.trigger];
-  const runs = RUNS.filter(r => r.agentId === a.id);
-  const ok = runs.filter(r => r.status === 'COMPLETED').length;
-  const field = (label, value) => `<div class="p-3 rounded-xl bg-gray-50 border border-gray-100">
-      <div class="text-[10px] font-bold uppercase tracking-wider text-gray-400">${label}</div>
-      <div class="text-[13px] font-semibold mt-1">${value}</div></div>`;
-
-  return `<div class="flex flex-col h-full">
-    <div class="px-6 py-5 border-b border-gray-100 flex items-start gap-3 bg-gradient-to-r from-[#f05742]/[.06] to-transparent">
-      <div class="w-11 h-11 rounded-xl bg-gradient-to-br from-[#f05742] to-[#ff6b58] flex items-center justify-center shrink-0">
-        <i data-lucide="workflow" class="w-5 h-5 text-white"></i></div>
-      <div class="min-w-0 flex-1">
-        <div class="text-[17px] font-bold leading-tight">${esc(a.display)}</div>
-        <div class="text-[11px] text-gray-400 font-mono mt-0.5">${esc(a.name)}</div>
-      </div>
-      <button class="p-2 rounded-lg hover:bg-gray-100" data-action="close-modal"><i data-lucide="x" class="w-4 h-4 text-gray-500"></i></button>
-    </div>
-    <div class="flex-1 overflow-y-auto p-6 space-y-5">
-      <div class="flex items-center gap-2 flex-wrap">
-        ${agentBadge(a.status)} ${pill('v' + a.version, 'gray')}
-        ${pill(`<i data-lucide="${t.icon}" class="w-3 h-3"></i>${t.label} trigger`, t.tone)}
-        ${a.hitl ? pill('<i data-lucide="user-check" class="w-3 h-3"></i>HITL gate', 'amber') : pill('Fully automated', 'green')}
-      </div>
-      <p class="text-[13px] text-gray-600 leading-relaxed">${esc(a.description)}</p>
-
-      <div class="grid grid-cols-2 gap-3">
-        ${field('Use Case', titleize(a.useCase))}
-        ${field('Industry', esc(a.industry))}
-        ${field('OCR Engine', esc(a.ocr))}
-        ${field('Extraction Model', '<span class="font-mono text-[12px]">' + esc(a.model) + '</span>')}
-        ${field('Pipeline Steps', a.steps + ' steps')}
-        ${field('Extraction Fields', a.fields + ' fields')}
-        ${field('Created', fmtDate(a.created))}
-        ${field('Last Updated', fmtDate(a.updated))}
-      </div>
-
-      <div>
-        <div class="text-[11px] font-bold uppercase tracking-wider text-gray-400 mb-2">Recent runs</div>
-        <div class="rounded-xl border border-gray-100 divide-y divide-gray-50 overflow-hidden">
-          ${runs.length ? runs.slice(0, 5).map(r => `
-            <div class="flex items-center gap-3 px-3 py-2.5 hover:bg-gray-50 cursor-pointer" data-action="nav" data-route="/run/${r.runId}">
-              <span class="step-dot ${RUN_STATUS[r.status].dot}"></span>
-              <span class="font-mono text-[11px] text-gray-500 flex-1 truncate">${esc(r.runId)}</span>
-              <span class="text-[11px] text-gray-400">${ago(r.startedAt)}</span>
-              ${runBadge(r.status)}
-            </div>`).join('')
-            : '<div class="px-3 py-6 text-center text-[12px] text-gray-400">No runs recorded yet</div>'}
-        </div>
-        ${runs.length ? `<div class="text-[11px] text-gray-400 mt-2">${ok} of ${runs.length} recent runs completed successfully</div>` : ''}
-      </div>
-    </div>
-    <div class="px-6 py-4 border-t border-gray-100 flex items-center gap-2 bg-gray-50/60">
-      <button class="btn-secondary" data-action="nav" data-route="/builder"><i data-lucide="pencil" class="w-4 h-4"></i>Edit</button>
-      <button class="btn-secondary" data-action="nav" data-route="/playground"><i data-lucide="play" class="w-4 h-4"></i>Playground</button>
-      <button class="btn-secondary" data-action="toast" data-msg="agent config YAML downloaded"><i data-lucide="download" class="w-4 h-4"></i>Download YAML</button>
-      <div class="flex-1"></div>
-      <button class="btn-primary" data-action="nav" data-route="/runs"><i data-lucide="history" class="w-4 h-4"></i>View Runs</button>
-    </div>
-  </div>`;
-}
 
 AFTER['/agents'] = () => {
   const s = $('#agent-search');
@@ -1504,33 +1513,19 @@ AFTER['/agents'] = () => {
     let t;
     s.addEventListener('input', () => {
       clearTimeout(t);
-      t = setTimeout(() => { STATE.agentSearch = s.value; router(); setTimeout(() => { const el = $('#agent-search'); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } }, 0); }, 280);
+      t = setTimeout(() => {
+        STATE.agentSearch = s.value; router();
+        setTimeout(() => { const el = $('#agent-search'); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } }, 0);
+      }, 280);
     });
   }
   const st = $('#agent-status'); if (st) st.addEventListener('change', () => { STATE.agentStatus = st.value; router(); });
-  const ct = $('#agent-category'); if (ct) ct.addEventListener('change', () => { STATE.agentCategory = ct.value; router(); });
 
   $('#screen').addEventListener('click', (e) => {
-    const del = e.target.closest('[data-agent-delete]');
-    if (del) {
-      e.stopPropagation();
-      const a = AGENTS.find(x => x.id === del.getAttribute('data-agent-delete'));
-      openModal(`<div class="bg-white rounded-2xl p-6">
-        <div class="flex items-start gap-3">
-          <div class="w-11 h-11 rounded-xl bg-red-50 flex items-center justify-center shrink-0"><i data-lucide="alert-triangle" class="w-5 h-5 text-red-500"></i></div>
-          <div>
-            <h3 class="font-bold text-[16px]">Delete this agent?</h3>
-            <p class="text-[13px] text-gray-500 mt-1.5"><b>${esc(a.display)}</b> and its ${a.version} published configuration versions will be removed. Run history is retained for audit. This cannot be undone.</p>
-          </div>
-        </div>
-        <div class="flex justify-end gap-2 mt-6">
-          <button class="btn-secondary" data-action="close-modal">Cancel</button>
-          <button class="btn-primary !bg-none !bg-red-600" data-action="close-modal" onclick="toast('Agent deleted','error')">Yes, delete</button>
-        </div></div>`);
-      return;
-    }
-    const up = e.target.closest('[data-agent-action="upload"]');
-    if (up) {
+    const ty = e.target.closest('[data-agent-type]');
+    if (ty) { STATE.agentType = ty.getAttribute('data-agent-type'); router(); return; }
+
+    if (e.target.closest('[data-agent-action="upload"]')) {
       openModal(`<div class="bg-white rounded-2xl overflow-hidden">
         <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
           <div><h3 class="font-bold text-[16px]">Upload Agent YAML</h3>
@@ -1545,7 +1540,7 @@ AFTER['/agents'] = () => {
           </div>
           <div class="mt-4 p-3 rounded-xl bg-blue-50 border border-blue-100 flex gap-2.5">
             <i data-lucide="info" class="w-4 h-4 text-blue-500 shrink-0 mt-0.5"></i>
-            <div class="text-[12px] text-blue-800 leading-relaxed">Seven validators run before the agent is accepted: syntax, schema, semantic, reference, dependency, flow and contract. Contract validation confirms every <span class="font-mono">on_failure</span> key is an error code that step type can actually raise.</div>
+            <div class="text-[12px] text-blue-800 leading-relaxed">Seven validators run before the agent is accepted: syntax, schema, semantic, reference, dependency, flow and contract. An uploaded agent lands as <b>Custom</b> type.</div>
           </div>
         </div>
         <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-2 bg-gray-50/60">
@@ -1554,10 +1549,639 @@ AFTER['/agents'] = () => {
         </div></div>`, { width:'max-w-xl w-full' });
       return;
     }
-    const row = e.target.closest('[data-agent-row]');
-    if (row && !e.target.closest('button')) {
-      const a = AGENTS.find(x => x.id === row.getAttribute('data-agent-row'));
-      openDrawer(agentDrawer(a));
+
+    const card = e.target.closest('[data-agent-card]');
+    if (card) location.hash = '#/agent/' + card.getAttribute('data-agent-card');
+  });
+};
+
+/* ================================================================
+   AGENT WORKSPACE   #/agent/:id/:tab
+   ================================================================ */
+const WS_TABS = [
+  { key:'overview',  label:'Overview',  icon:'layout-dashboard' },
+  { key:'configure', label:'Configure', icon:'sliders-horizontal' },
+  { key:'workbench', label:'Workbench', icon:'table-2' },
+  { key:'runs',      label:'Runs',      icon:'history' },
+  { key:'reviews',   label:'Reviews',   icon:'user-check' },
+  { key:'settings',  label:'Settings',  icon:'settings' },
+];
+
+/* ---- Per-type workbenches ---- */
+function wbReconciliation(a) {
+  const counts = RECON_ROWS.reduce((acc, r) => { acc[r.status] = (acc[r.status] || 0) + 1; return acc; }, {});
+  const totalA = RECON_ROWS.filter(r => r.amtA != null).reduce((s, r) => s + r.amtA, 0);
+  const totalB = RECON_ROWS.filter(r => r.amtB != null).reduce((s, r) => s + r.amtB, 0);
+  const variance = +(totalA - totalB).toFixed(2);
+  const autoPct = Math.round((counts.matched || 0) / RECON_ROWS.length * 100);
+  const recipe = RECIPES.find(r => r.id === (a.id === 'agt_recon_card' ? 'retail-card' : 'retail-bank')) || RECIPES[0];
+
+  return `
+    <div class="flex items-start justify-between gap-4 mb-4 flex-wrap">
+      <div>
+        <div class="text-[15px] font-bold">${esc(recipe.a.label)} <span class="text-gray-300">↔</span> ${esc(recipe.b.label)}</div>
+        <div class="text-[12px] text-gray-500 mt-0.5">Run rec_8f21c4 · 18 Aug 2026 · matched with a ± ${recipe.tolDays} day settlement window</div>
+      </div>
+      <div class="flex items-center gap-2">
+        <button class="btn-secondary" data-action="toast" data-msg="Exception report exported as CSV"><i data-lucide="download" class="w-4 h-4"></i>Export CSV</button>
+        <button class="btn-primary" data-action="toast" data-msg="New reconciliation run queued"><i data-lucide="play" class="w-4 h-4"></i>Run now</button>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 mb-4">
+      ${[['Records read', RECON_ROWS.length, 'file-text', '#6b7280'],
+         ['Auto matched', counts.matched || 0, 'check-circle', '#10b981'],
+         ['Discrepant', counts.discrepant || 0, 'alert-triangle', '#f59e0b'],
+         ['Needs review', counts.review || 0, 'user-check', '#f97316'],
+         ['Unmatched', counts.unmatched || 0, 'x-circle', '#ef4444'],
+         ['Net variance', sgd(Math.abs(variance)), 'scale', '#f05742']]
+        .map(([label, val, icon, color]) => `
+        <div class="rounded-xl border border-gray-200 p-3.5">
+          <div class="flex items-center gap-1.5" style="color:${color}"><i data-lucide="${icon}" class="w-3.5 h-3.5"></i>
+            <span class="text-[10px] font-bold uppercase tracking-wider">${label}</span></div>
+          <div class="text-[19px] font-bold mt-1.5 leading-none">${val}</div></div>`).join('')}
+    </div>
+
+    <div class="rounded-xl border border-[#f05742]/20 bg-gradient-to-r from-[#f05742]/[.06] via-white to-white p-4 mb-4 flex items-center gap-4 flex-wrap">
+      <div class="flex items-center gap-2.5">
+        <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-[#f05742] to-[#ff6b58] flex items-center justify-center shrink-0">
+          <i data-lucide="zap" class="w-4 h-4 text-white"></i></div>
+        <div><div class="text-[10px] uppercase tracking-wider font-bold text-gray-400">Auto-match rate</div>
+          <div class="text-[19px] font-bold leading-tight">${autoPct}%</div></div>
+      </div>
+      <div class="h-8 w-px bg-gray-200 hidden md:block"></div>
+      <div class="text-[12px] text-gray-600 flex-1 min-w-[260px] leading-relaxed">
+        Without the ± ${recipe.tolDays} day window, ${RECON_ROWS.filter(r => r.status === 'matched' && r.dateA !== r.dateB).length} of the matched rows would have been reported as unmatched.
+      </div>
+      ${pill('<i data-lucide="calendar-clock" class="w-3 h-3"></i>± ' + recipe.tolDays + ' day tolerance', 'blue')}
+    </div>
+
+    <div class="rounded-xl border border-gray-200 overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="dt w-full" style="min-width:1060px">
+          <thead class="bg-gray-50/80 border-b border-gray-100">
+            <tr>
+              <th colspan="3" class="text-left px-4 py-2 border-r border-gray-200 bg-[#f05742]/[.05]"><span class="text-[#f05742]">A · ${esc(recipe.a.label)}</span></th>
+              <th colspan="3" class="text-left px-4 py-2 border-r border-gray-200 bg-blue-50"><span class="text-blue-600">B · ${esc(recipe.b.label)}</span></th>
+              <th colspan="3" class="text-left px-4 py-2">Result</th>
+            </tr>
+            <tr>
+              <th class="text-left px-4 py-2.5">Txn ID</th><th class="text-left px-4 py-2.5">Date</th><th class="text-right px-4 py-2.5 border-r border-gray-200">Amount</th>
+              <th class="text-left px-4 py-2.5">Reference</th><th class="text-left px-4 py-2.5">Date</th><th class="text-right px-4 py-2.5 border-r border-gray-200">Amount</th>
+              <th class="text-left px-4 py-2.5 w-36">Status</th><th class="text-left px-4 py-2.5 w-20">Conf.</th><th class="text-left px-4 py-2.5">Why</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-50">
+            ${RECON_ROWS.map(r => {
+              const st = RECON_STATUS[r.status];
+              const amtMismatch = r.amtA != null && r.amtB != null && Math.abs(r.amtA - r.amtB) > 0.001;
+              const dateShift = r.dateA && r.dateB && r.dateA !== r.dateB;
+              const missA = r.amtA == null, missB = r.amtB == null;
+              return `<tr class="${r.status === 'unmatched' ? 'bg-red-50/40' : r.status === 'discrepant' ? 'bg-amber-50/40' : r.status === 'review' ? 'bg-orange-50/30' : ''}">
+                <td class="px-4 py-2.5 font-mono text-[11.5px] ${missA ? 'text-gray-300' : ''}">${esc(r.id)}</td>
+                <td class="px-4 py-2.5 text-[11.5px] ${missA ? 'text-gray-300' : 'text-gray-600'}">${r.dateA || '—'}</td>
+                <td class="px-4 py-2.5 text-right font-mono text-[11.5px] border-r border-gray-100 ${missA ? 'text-gray-300' : amtMismatch ? 'bg-amber-100 font-bold rounded' : ''}">${r.amtA != null ? r.amtA.toFixed(2) : '—'}</td>
+                <td class="px-4 py-2.5 font-mono text-[11.5px] ${missB ? 'text-gray-300' : r.status === 'review' ? 'bg-orange-100 rounded font-semibold' : ''}">${esc(r.refB || '—')}</td>
+                <td class="px-4 py-2.5 text-[11.5px] ${missB ? 'text-gray-300' : dateShift ? 'text-blue-600 font-semibold' : 'text-gray-600'}">${r.dateB || '—'}</td>
+                <td class="px-4 py-2.5 text-right font-mono text-[11.5px] border-r border-gray-100 ${missB ? 'text-gray-300' : amtMismatch ? 'bg-amber-100 font-bold rounded' : ''}">${r.amtB != null ? r.amtB.toFixed(2) : '—'}</td>
+                <td class="px-4 py-2.5"><span class="chip border ${st.cls}"><i data-lucide="${st.icon}" class="w-3 h-3"></i>${st.label}</span></td>
+                <td class="px-4 py-2.5 font-mono text-[11.5px] ${r.conf != null && r.conf < 0.85 ? 'text-orange-600 font-bold' : 'text-gray-500'}">${r.conf != null ? (r.conf * 100).toFixed(0) + '%' : '—'}</td>
+                <td class="px-4 py-2.5 text-[11.5px] text-gray-600 max-w-[260px]"><div class="line-clamp-2">${esc(r.note)}</div></td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+          <tfoot class="border-t-2 border-gray-100 bg-gray-50/60">
+            <tr class="font-bold">
+              <td colspan="2" class="px-4 py-3 text-[12px]">Totals</td>
+              <td class="px-4 py-3 text-right font-mono text-[12px] border-r border-gray-200">${totalA.toFixed(2)}</td>
+              <td colspan="2" class="px-4 py-3"></td>
+              <td class="px-4 py-3 text-right font-mono text-[12px] border-r border-gray-200">${totalB.toFixed(2)}</td>
+              <td colspan="3" class="px-4 py-3 text-[12px]">Variance <span class="font-mono text-[#f05742]">${variance >= 0 ? '+' : ''}${variance.toFixed(2)}</span></td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+    </div>`;
+}
+
+const CLAIM_ROWS = [
+  { id:'CLM-22104', insured:'Tan Mei Ling',      policy:'POL-88231', loss:'11 Aug 2026', amount:1840.00, verdict:'approved', conf:0.96, note:'Within cover, below the auto-approve threshold' },
+  { id:'CLM-22105', insured:'Rajesh Kumaran',    policy:'POL-77410', loss:'09 Aug 2026', amount:12400.00, verdict:'review',  conf:0.91, note:'Above SGD 10,000 — always routed to a human' },
+  { id:'CLM-22106', insured:'Goh Wei Ming',      policy:'POL-91002', loss:'12 Aug 2026', amount:640.00,  verdict:'approved', conf:0.98, note:'All checks passed' },
+  { id:'CLM-22107', insured:'Fatimah Bte Yusof', policy:'POL-66188', loss:'02 Jul 2026', amount:3200.00, verdict:'rejected', conf:0.94, note:'Policy lapsed 28 Jun 2026 — no cover on the date of loss' },
+  { id:'CLM-22108', insured:'Daniel Lim',        policy:'POL-88994', loss:'14 Aug 2026', amount:2750.00, verdict:'review',   conf:0.72, note:'Handwritten assessor note could not be read with confidence' },
+  { id:'CLM-22109', insured:'Priya Raman',       policy:'POL-70233', loss:'15 Aug 2026', amount:980.00,  verdict:'approved', conf:0.97, note:'All checks passed' },
+  { id:'CLM-22110', insured:'Chen Xiu Ying',     policy:'POL-88231', loss:'11 Aug 2026', amount:1840.00, verdict:'review',   conf:0.88, note:'Possible duplicate of CLM-22104 — same policy and loss date' },
+];
+const VERDICT = {
+  approved: { label:'Approved', cls:'bg-green-50 text-green-700 border-green-200', icon:'check-circle' },
+  review:   { label:'Needs review', cls:'bg-orange-50 text-orange-700 border-orange-200', icon:'user-check' },
+  rejected: { label:'Rejected', cls:'bg-red-50 text-red-700 border-red-200', icon:'x-circle' },
+};
+
+function wbClaims(a) {
+  const c = CLAIM_ROWS.reduce((acc, r) => { acc[r.verdict] = (acc[r.verdict] || 0) + 1; return acc; }, {});
+  const value = CLAIM_ROWS.reduce((s, r) => s + r.amount, 0);
+  return `
+    <div class="flex items-start justify-between gap-4 mb-4 flex-wrap">
+      <div><div class="text-[15px] font-bold">Claims queue</div>
+        <div class="text-[12px] text-gray-500 mt-0.5">Every claim pack this agent has assessed in the last 7 days</div></div>
+      <div class="flex items-center gap-2">
+        <button class="btn-secondary" data-action="toast" data-msg="Claims register exported"><i data-lucide="download" class="w-4 h-4"></i>Export</button>
+        <button class="btn-primary" data-action="nav" data-route="/upload"><i data-lucide="upload" class="w-4 h-4"></i>Submit a claim pack</button>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+      ${[['Assessed', CLAIM_ROWS.length, 'clipboard-plus', '#3b82f6'],
+         ['Auto approved', c.approved || 0, 'check-circle', '#10b981'],
+         ['Needs review', c.review || 0, 'user-check', '#f97316'],
+         ['Value assessed', sgd(value), 'dollar-sign', '#f05742']]
+        .map(([label, val, icon, color]) => `
+        <div class="rounded-xl border border-gray-200 p-3.5">
+          <div class="flex items-center gap-1.5" style="color:${color}"><i data-lucide="${icon}" class="w-3.5 h-3.5"></i>
+            <span class="text-[10px] font-bold uppercase tracking-wider">${label}</span></div>
+          <div class="text-[19px] font-bold mt-1.5 leading-none">${val}</div></div>`).join('')}
+    </div>
+
+    <div class="rounded-xl border border-gray-200 overflow-hidden overflow-x-auto">
+      <table class="dt w-full" style="min-width:960px">
+        <thead class="bg-gray-50/80 border-b border-gray-100"><tr>
+          <th class="text-left px-4 py-2.5 w-32">Claim no.</th>
+          <th class="text-left px-4 py-2.5">Insured</th>
+          <th class="text-left px-4 py-2.5 w-32">Policy</th>
+          <th class="text-left px-4 py-2.5 w-32">Date of loss</th>
+          <th class="text-right px-4 py-2.5 w-32">Claimed</th>
+          <th class="text-left px-4 py-2.5 w-36">Verdict</th>
+          <th class="text-left px-4 py-2.5 w-20">Conf.</th>
+          <th class="text-left px-4 py-2.5">Reason</th></tr></thead>
+        <tbody class="divide-y divide-gray-50">
+          ${CLAIM_ROWS.map(r => {
+            const v = VERDICT[r.verdict];
+            return `<tr class="${r.verdict === 'review' ? 'bg-orange-50/30' : r.verdict === 'rejected' ? 'bg-red-50/30' : ''}">
+              <td class="px-4 py-2.5 font-mono text-[11.5px] font-semibold">${esc(r.id)}</td>
+              <td class="px-4 py-2.5 text-[12.5px] font-medium">${esc(r.insured)}</td>
+              <td class="px-4 py-2.5 font-mono text-[11.5px] text-gray-500">${esc(r.policy)}</td>
+              <td class="px-4 py-2.5 text-[12px] text-gray-600">${esc(r.loss)}</td>
+              <td class="px-4 py-2.5 text-right font-mono text-[11.5px] font-semibold">${r.amount.toFixed(2)}</td>
+              <td class="px-4 py-2.5"><span class="chip border ${v.cls}"><i data-lucide="${v.icon}" class="w-3 h-3"></i>${v.label}</span></td>
+              <td class="px-4 py-2.5 font-mono text-[11.5px] ${r.conf < 0.85 ? 'text-orange-600 font-bold' : 'text-gray-500'}">${(r.conf * 100).toFixed(0)}%</td>
+              <td class="px-4 py-2.5 text-[11.5px] text-gray-600 max-w-[300px]"><div class="line-clamp-2">${esc(r.note)}</div></td>
+            </tr>`;
+          }).join('')}
+        </tbody></table>
+    </div>`;
+}
+
+const INVOICE_ROWS = [
+  { id:'INV-88214', vendor:'Teck Sang Trading Co.', date:'14 Aug 2026', amount:2340.00, checks:6, total:6, verdict:'approved', conf:0.98, note:'Totals reconcile, line items sum, no duplicate' },
+  { id:'INV-88215', vendor:'Teck Sang Trading Co.', date:'15 Aug 2026', amount:1104.50, checks:6, total:6, verdict:'approved', conf:0.97, note:'All checks passed' },
+  { id:'INV-88218', vendor:'Golden Wok Supplies',   date:'15 Aug 2026', amount:6820.00, checks:5, total:6, verdict:'review',   conf:0.93, note:'Above the SGD 5,000 auto-post threshold' },
+  { id:'INV-88220', vendor:'Teck Sang Trading Co.', date:'16 Aug 2026', amount:2007.78, checks:4, total:6, verdict:'review',   conf:0.71, note:'Bank account not captured; GST amount below the confidence gate' },
+  { id:'INV-88221', vendor:'Hup Seng Distributors', date:'16 Aug 2026', amount:894.00,  checks:6, total:6, verdict:'approved', conf:0.96, note:'All checks passed' },
+  { id:'INV-88223', vendor:'Golden Wok Supplies',   date:'17 Aug 2026', amount:1450.20, checks:5, total:6, verdict:'rejected', conf:0.95, note:'Line items sum to 1,410.20 — SGD 40.00 short of the stated subtotal' },
+  { id:'INV-88224', vendor:'Hup Seng Distributors', date:'18 Aug 2026', amount:894.00,  checks:5, total:6, verdict:'review',   conf:0.94, note:'Duplicate of INV-88221 — same vendor, amount and date' },
+];
+
+function wbInvoice(a) {
+  const c = INVOICE_ROWS.reduce((acc, r) => { acc[r.verdict] = (acc[r.verdict] || 0) + 1; return acc; }, {});
+  const value = INVOICE_ROWS.reduce((s, r) => s + r.amount, 0);
+  const held = INVOICE_ROWS.filter(r => r.verdict !== 'approved').reduce((s, r) => s + r.amount, 0);
+  return `
+    <div class="flex items-start justify-between gap-4 mb-4 flex-wrap">
+      <div><div class="text-[15px] font-bold">Validation queue</div>
+        <div class="text-[12px] text-gray-500 mt-0.5">Invoices this agent read, checked and either posted or held</div></div>
+      <div class="flex items-center gap-2">
+        <button class="btn-secondary" data-action="toast" data-msg="AP register exported"><i data-lucide="download" class="w-4 h-4"></i>Export</button>
+        <button class="btn-primary" data-action="toast" data-msg="4 approved invoices posted to the ERP"><i data-lucide="send" class="w-4 h-4"></i>Post approved</button>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+      ${[['Processed', INVOICE_ROWS.length, 'receipt', '#10b981'],
+         ['Auto posted', c.approved || 0, 'check-circle', '#10b981'],
+         ['Held for review', (c.review || 0) + (c.rejected || 0), 'pause-circle', '#f59e0b'],
+         ['Value held', sgd(held), 'dollar-sign', '#f05742']]
+        .map(([label, val, icon, color]) => `
+        <div class="rounded-xl border border-gray-200 p-3.5">
+          <div class="flex items-center gap-1.5" style="color:${color}"><i data-lucide="${icon}" class="w-3.5 h-3.5"></i>
+            <span class="text-[10px] font-bold uppercase tracking-wider">${label}</span></div>
+          <div class="text-[19px] font-bold mt-1.5 leading-none">${val}</div></div>`).join('')}
+    </div>
+
+    <div class="rounded-xl border border-gray-200 overflow-hidden overflow-x-auto">
+      <table class="dt w-full" style="min-width:1000px">
+        <thead class="bg-gray-50/80 border-b border-gray-100"><tr>
+          <th class="text-left px-4 py-2.5 w-32">Invoice no.</th>
+          <th class="text-left px-4 py-2.5">Vendor</th>
+          <th class="text-left px-4 py-2.5 w-32">Invoice date</th>
+          <th class="text-right px-4 py-2.5 w-32">Amount</th>
+          <th class="text-left px-4 py-2.5 w-36">Checks</th>
+          <th class="text-left px-4 py-2.5 w-36">Verdict</th>
+          <th class="text-left px-4 py-2.5">Reason</th></tr></thead>
+        <tbody class="divide-y divide-gray-50">
+          ${INVOICE_ROWS.map(r => {
+            const v = VERDICT[r.verdict];
+            return `<tr class="${r.verdict === 'review' ? 'bg-orange-50/30' : r.verdict === 'rejected' ? 'bg-red-50/30' : ''}">
+              <td class="px-4 py-2.5 font-mono text-[11.5px] font-semibold">${esc(r.id)}</td>
+              <td class="px-4 py-2.5 text-[12.5px] font-medium">${esc(r.vendor)}</td>
+              <td class="px-4 py-2.5 text-[12px] text-gray-600">${esc(r.date)}</td>
+              <td class="px-4 py-2.5 text-right font-mono text-[11.5px] font-semibold">${r.amount.toFixed(2)}</td>
+              <td class="px-4 py-2.5">
+                <div class="flex items-center gap-2">
+                  <div class="flex-1 h-1.5 rounded-full bg-gray-100 overflow-hidden">
+                    <div class="h-full rounded-full ${r.checks === r.total ? 'bg-green-500' : 'bg-amber-500'}" style="width:${r.checks / r.total * 100}%"></div></div>
+                  <span class="font-mono text-[11px] text-gray-500 shrink-0">${r.checks}/${r.total}</span></div></td>
+              <td class="px-4 py-2.5"><span class="chip border ${v.cls}"><i data-lucide="${v.icon}" class="w-3 h-3"></i>${v.label}</span></td>
+              <td class="px-4 py-2.5 text-[11.5px] text-gray-600 max-w-[300px]"><div class="line-clamp-2">${esc(r.note)}</div></td>
+            </tr>`;
+          }).join('')}
+        </tbody></table>
+    </div>`;
+}
+
+function wbCustom(a) {
+  const runs = RUNS.filter(r => r.agentId === a.id).slice(0, 8);
+  return `
+    <div class="flex items-start justify-between gap-4 mb-4 flex-wrap">
+      <div><div class="text-[15px] font-bold">Extraction results</div>
+        <div class="text-[12px] text-gray-500 mt-0.5">What this agent pulled out of each document it processed</div></div>
+      <button class="btn-primary" data-action="nav" data-route="/upload"><i data-lucide="upload" class="w-4 h-4"></i>Send a document</button>
+    </div>
+    ${runs.length ? `
+    <div class="rounded-xl border border-gray-200 overflow-hidden overflow-x-auto">
+      <table class="dt w-full" style="min-width:860px">
+        <thead class="bg-gray-50/80 border-b border-gray-100"><tr>
+          <th class="text-left px-4 py-2.5">Document</th>
+          <th class="text-left px-4 py-2.5 w-40">Processed</th>
+          <th class="text-left px-4 py-2.5 w-32">Fields</th>
+          <th class="text-left px-4 py-2.5 w-24">Conf.</th>
+          <th class="text-left px-4 py-2.5 w-40">Status</th>
+          <th class="text-center px-4 py-2.5 w-24">Output</th></tr></thead>
+        <tbody class="divide-y divide-gray-50">
+          ${runs.map(r => `<tr class="cursor-pointer" data-action="nav" data-route="/run/${r.runId}">
+            <td class="px-4 py-2.5"><div class="text-[12.5px] font-medium">${esc(r.files[0])}</div>
+              <div class="text-[10.5px] text-gray-400 font-mono">${esc(r.runId)}</div></td>
+            <td class="px-4 py-2.5 text-[12px] text-gray-500">${fmtDateTime(r.startedAt)}</td>
+            <td class="px-4 py-2.5 font-mono text-[11.5px]">${r.status === 'FAILED' ? '—' : a.fields + ' of ' + a.fields}</td>
+            <td class="px-4 py-2.5 font-mono text-[11.5px] ${r.confidence != null && r.confidence < 0.85 ? 'text-orange-600 font-bold' : 'text-gray-500'}">${r.confidence != null ? r.confidence : '—'}</td>
+            <td class="px-4 py-2.5">${runBadge(r.status)}</td>
+            <td class="px-4 py-2.5 text-center">
+              <button class="p-1.5 rounded-lg hover:bg-gray-100 text-[#f05742]"><i data-lucide="eye" class="w-4 h-4"></i></button></td>
+          </tr>`).join('')}
+        </tbody></table>
+    </div>`
+    : `<div class="rounded-xl border border-gray-200 py-16 text-center">
+        <div class="w-14 h-14 rounded-2xl bg-gray-100 flex items-center justify-center mx-auto mb-3"><i data-lucide="inbox" class="w-6 h-6 text-gray-400"></i></div>
+        <div class="font-semibold text-gray-600 text-[13.5px]">Nothing processed yet</div>
+        <div class="text-[12px] text-gray-400 mt-1">Send this agent a document and the results will land here.</div></div>`}`;
+}
+
+const WORKBENCH = {
+  reconciliation: wbReconciliation,
+  claims: wbClaims,
+  'invoice-validator': wbInvoice,
+  custom: wbCustom,
+};
+
+/* ---- Configure tab: read-only mirror of the builder ---- */
+function wsConfigure(a) {
+  const t = AGENT_TYPE[a.type];
+  const field = (label, value) => `<div class="p-3.5 rounded-xl bg-gray-50 border border-gray-100">
+      <div class="text-[10px] font-bold uppercase tracking-wider text-gray-400">${label}</div>
+      <div class="text-[12.5px] font-semibold mt-1">${value}</div></div>`;
+
+  const typeSpecific = a.type === 'reconciliation' ? (() => {
+    const r = RECIPES.find(x => x.id === (a.id === 'agt_recon_card' ? 'retail-card' : 'retail-bank')) || RECIPES[0];
+    return `<div class="mt-5">
+      <div class="text-[13px] font-bold mb-1">Field mapping</div>
+      <p class="text-[12px] text-gray-500 mb-3">${esc(r.a.label)} against ${esc(r.b.label)}, ± ${r.tolDays} day window</p>
+      <div class="rounded-xl border border-gray-200 overflow-hidden overflow-x-auto">
+        <table class="dt w-full"><thead class="bg-gray-50 border-b border-gray-200"><tr>
+          <th class="text-left px-4 py-2.5">Side A</th><th class="px-2 py-2.5"></th><th class="text-left px-4 py-2.5">Side B</th>
+          <th class="text-left px-4 py-2.5">Match type</th><th class="text-left px-4 py-2.5">Tolerance</th></tr></thead>
+          <tbody class="divide-y divide-gray-50">
+            ${r.map.map(m => `<tr><td class="px-4 py-2.5 font-medium">${esc(m.a)}</td>
+              <td class="px-2 py-2.5 text-center text-gray-300"><i data-lucide="arrow-right" class="w-3.5 h-3.5 inline"></i></td>
+              <td class="px-4 py-2.5 font-medium">${esc(m.b)}</td>
+              <td class="px-4 py-2.5">${pill(esc(m.type), m.type === 'Exact' ? 'green' : m.type.startsWith('Date') ? 'blue' : m.type.startsWith('Fuzzy') ? 'purple' : 'amber')}</td>
+              <td class="px-4 py-2.5 text-gray-500 font-mono text-[11.5px]">${esc(m.tol || '—')}</td></tr>`).join('')}
+          </tbody></table></div></div>`;
+  })() : a.type === 'claims' ? `
+    <div class="mt-5">
+      <div class="text-[13px] font-bold mb-1">Coverage rules</div>
+      <p class="text-[12px] text-gray-500 mb-3">${CLAIM_RULES.length} rules, all active</p>
+      <div class="space-y-2">
+        ${CLAIM_RULES.map(([name, desc]) => `<div class="flex items-start gap-2.5 p-3 rounded-xl border border-gray-100 bg-gray-50/50">
+          <i data-lucide="check-circle" class="w-4 h-4 text-green-500 shrink-0 mt-0.5"></i>
+          <div><div class="text-[12.5px] font-semibold">${esc(name)}</div>
+            <div class="text-[11.5px] text-gray-500 mt-0.5">${esc(desc)}</div></div></div>`).join('')}
+      </div></div>`
+  : a.type === 'invoice-validator' ? `
+    <div class="mt-5">
+      <div class="text-[13px] font-bold mb-1">Extraction fields</div>
+      <p class="text-[12px] text-gray-500 mb-3">${SCHEMA_FIELDS.length} fields, ${SCHEMA_FIELDS.filter(f => f.req).length} required</p>
+      <div class="flex flex-wrap gap-1.5 mb-5">
+        ${SCHEMA_FIELDS.map(f => `<span class="px-2.5 py-1 rounded-lg bg-gray-50 border border-gray-200 text-[12px] font-medium">${esc(f.label)}${f.req ? ' <span class="text-[#f05742]">*</span>' : ''}</span>`).join('')}
+      </div>
+      <div class="text-[13px] font-bold mb-1">Validation rules</div>
+      <div class="space-y-2 mt-3">
+        ${VALIDATION_RULES.map(r => `<div class="flex items-start gap-2.5 p-3 rounded-xl border border-gray-100 bg-gray-50/50">
+          <i data-lucide="check-circle" class="w-4 h-4 text-green-500 shrink-0 mt-0.5"></i>
+          <div><div class="text-[12.5px] font-semibold flex items-center gap-2">${esc(r.name)} ${r.builtin ? pill('Built-in','gray') : pill('Custom','brand')}</div>
+            <div class="text-[11.5px] text-gray-500 mt-0.5">${esc(r.desc)}</div></div></div>`).join('')}
+      </div></div>`
+  : `<div class="mt-5">
+      <div class="text-[13px] font-bold mb-1">Original requirement</div>
+      <p class="text-[12px] text-gray-500 mb-3">This agent was generated from a plain-language description. Editing the description regenerates the pipeline.</p>
+      <pre class="rounded-xl border border-gray-200 bg-gray-50 p-4 text-[12px] leading-relaxed whitespace-pre-wrap font-sans text-gray-700">${esc(CUSTOM_PROMPT_DEFAULT)}</pre>
+    </div>`;
+
+  return `
+    <div class="flex items-start justify-between gap-4 mb-4 flex-wrap">
+      <div><div class="text-[15px] font-bold">Configuration</div>
+        <div class="text-[12px] text-gray-500 mt-0.5">Version ${a.version} is published and frozen. Editing starts a new draft.</div></div>
+      <div class="flex items-center gap-2">
+        <button class="btn-secondary" data-action="toast" data-msg="Agent YAML downloaded"><i data-lucide="download" class="w-4 h-4"></i>Download YAML</button>
+        <button class="btn-primary" data-action="nav" data-route="/builder"><i data-lucide="pencil" class="w-4 h-4"></i>Edit configuration</button>
+      </div>
+    </div>
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+      ${field('Agent type', typeChip(a.type))}
+      ${field('Use case', esc(titleize(a.useCase)))}
+      ${field('OCR engine', esc(a.ocr))}
+      ${field('Extraction model', '<span class="font-mono text-[12px]">' + esc(a.model) + '</span>')}
+      ${field('Pipeline', a.steps + ' steps')}
+      ${field('Human review', a.hitl ? 'Enabled · 24h SLA' : 'Not required')}
+      ${field('Trigger', TRIGGER_META[a.trigger].label)}
+      ${field('Last updated', fmtDate(a.updated))}
+    </div>
+    ${typeSpecific}`;
+}
+
+function wsOverview(a) {
+  const st = agentStats(a);
+  const t = AGENT_TYPE[a.type];
+  return `
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
+      ${[['Runs / 30 days', num(st.monthly), 'activity', '#f05742'],
+         ['Success rate', st.success + '%', 'check-circle', '#10b981'],
+         ['Credits / 30 days', num(st.credits), 'coins', '#3b82f6'],
+         ['Cost per run', money(st.credits / st.monthly * 0.01), 'dollar-sign', '#a855f7']]
+        .map(([label, val, icon, color]) => `
+        <div class="rounded-xl border border-gray-200 p-4">
+          <div class="flex items-center gap-1.5" style="color:${color}"><i data-lucide="${icon}" class="w-3.5 h-3.5"></i>
+            <span class="text-[10px] font-bold uppercase tracking-wider">${label}</span></div>
+          <div class="text-[21px] font-bold mt-1.5 leading-none">${val}</div></div>`).join('')}
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+      <div class="lg:col-span-2 rounded-xl border border-gray-200 overflow-hidden">
+        <div class="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
+          <div class="text-[13px] font-bold">Recent runs</div>
+          <button class="text-[12px] font-semibold text-[#f05742] hover:underline" data-ws-tab="runs">View all</button>
+        </div>
+        ${st.runs.length ? `<div class="divide-y divide-gray-50">
+          ${st.runs.slice(0, 6).map(r => `<div class="flex items-center gap-3 px-4 py-2.5 hover:bg-gray-50 cursor-pointer" data-action="nav" data-route="/run/${r.runId}">
+            <span class="step-dot ${RUN_STATUS[r.status].dot}"></span>
+            <div class="min-w-0 flex-1"><div class="text-[12.5px] font-medium truncate">${esc(r.files[0])}</div>
+              <div class="text-[10.5px] text-gray-400 font-mono">${esc(r.runId)}</div></div>
+            <div class="text-right shrink-0">${runBadge(r.status)}
+              <div class="text-[10px] text-gray-400 mt-0.5">${ago(r.startedAt)}</div></div>
+          </div>`).join('')}</div>`
+          : '<div class="px-4 py-10 text-center text-[12px] text-gray-400">No runs recorded yet</div>'}
+      </div>
+
+      <div class="space-y-4">
+        <div class="rounded-xl border border-gray-200 p-4">
+          <div class="text-[13px] font-bold mb-2.5">About this agent</div>
+          <p class="text-[12px] text-gray-600 leading-relaxed">${esc(a.description)}</p>
+          <div class="flex flex-wrap gap-1.5 mt-3">
+            ${typeChip(a.type)} ${pill(esc(a.category), 'gray')} ${pill(esc(a.industry), 'gray')}
+          </div>
+        </div>
+        <div class="rounded-xl border p-4" style="border-color:${t.color}38;background:${t.color}0a">
+          <div class="flex items-center gap-2 mb-1.5">
+            <i data-lucide="${t.icon}" class="w-4 h-4" style="color:${t.color}"></i>
+            <span class="text-[12.5px] font-bold">${t.workbench}</span></div>
+          <p class="text-[11.5px] text-gray-600 leading-relaxed">${t.blurb}</p>
+          <button class="btn-secondary mt-3 w-full justify-center" data-ws-tab="workbench">
+            Open workbench <i data-lucide="arrow-right" class="w-3.5 h-3.5"></i></button>
+        </div>
+      </div>
+    </div>`;
+}
+
+function wsRuns(a) {
+  const runs = RUNS.filter(r => r.agentId === a.id);
+  return `
+    <div class="flex items-start justify-between gap-4 mb-4 flex-wrap">
+      <div><div class="text-[15px] font-bold">Runs</div>
+        <div class="text-[12px] text-gray-500 mt-0.5">${runs.length} executions of this agent</div></div>
+      <button class="btn-secondary" data-action="nav" data-route="/runs"><i data-lucide="external-link" class="w-4 h-4"></i>Full run history</button>
+    </div>
+    ${runs.length ? `
+    <div class="rounded-xl border border-gray-200 overflow-hidden overflow-x-auto">
+      <table class="dt w-full" style="min-width:880px">
+        <thead class="bg-gray-50/80 border-b border-gray-100"><tr>
+          <th class="text-left px-4 py-2.5 w-44">Run ID</th><th class="text-left px-4 py-2.5">Input</th>
+          <th class="text-left px-4 py-2.5 w-36">Initiated</th><th class="text-left px-4 py-2.5 w-24">Duration</th>
+          <th class="text-left px-4 py-2.5 w-40">Status</th><th class="text-left px-4 py-2.5">Remarks</th></tr></thead>
+        <tbody class="divide-y divide-gray-50">
+          ${runs.map(r => `<tr class="cursor-pointer" data-action="nav" data-route="/run/${r.runId}">
+            <td class="px-4 py-2.5"><div class="font-mono text-[11.5px]">${esc(r.runId)}</div>
+              ${r.mode === 'TEST' ? '<span class="inline-flex items-center gap-1 mt-1 px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 border border-amber-200 text-[9px] font-bold">TEST</span>' : ''}</td>
+            <td class="px-4 py-2.5 text-[12px] text-[#f05742]">${esc(r.files[0])}</td>
+            <td class="px-4 py-2.5 text-[12px] text-gray-500">${fmtDateTime(r.startedAt)}</td>
+            <td class="px-4 py-2.5 font-mono text-[11.5px] text-gray-600">${dur(r.durationSec)}</td>
+            <td class="px-4 py-2.5">${runBadge(r.status)}</td>
+            <td class="px-4 py-2.5 text-[11.5px] text-gray-600 max-w-[280px]"><div class="line-clamp-2">${esc(r.remarks)}</div></td>
+          </tr>`).join('')}
+        </tbody></table>
+    </div>`
+    : `<div class="rounded-xl border border-gray-200 py-16 text-center">
+        <div class="w-14 h-14 rounded-2xl bg-gray-100 flex items-center justify-center mx-auto mb-3"><i data-lucide="history" class="w-6 h-6 text-gray-400"></i></div>
+        <div class="font-semibold text-gray-600 text-[13.5px]">No runs yet</div></div>`}`;
+}
+
+function wsReviews(a) {
+  const revs = REVIEWS.filter(r => r.agentId === a.id);
+  if (!a.hitl) {
+    return `<div class="rounded-xl border border-gray-200 py-16 text-center">
+      <div class="w-14 h-14 rounded-2xl bg-gray-100 flex items-center justify-center mx-auto mb-3"><i data-lucide="user-x" class="w-6 h-6 text-gray-400"></i></div>
+      <div class="font-semibold text-gray-600 text-[13.5px]">This agent runs without a review gate</div>
+      <div class="text-[12px] text-gray-400 mt-1 max-w-sm mx-auto">Every run either completes or fails outright. Add a review gate in Configure if you want a human in the loop.</div></div>`;
+  }
+  return `
+    <div class="flex items-start justify-between gap-4 mb-4 flex-wrap">
+      <div><div class="text-[15px] font-bold">Reviews</div>
+        <div class="text-[12px] text-gray-500 mt-0.5">Runs this agent paused because a human decision was cheaper than a wrong answer</div></div>
+      <button class="btn-secondary" data-action="nav" data-route="/review"><i data-lucide="external-link" class="w-4 h-4"></i>Full review queue</button>
+    </div>
+    ${revs.length ? `
+    <div class="space-y-2.5">
+      ${revs.map(rv => {
+        const pct = Math.min(100, Math.round(rv.waitingH / rv.slaH * 100));
+        return `<div class="rounded-xl border border-gray-200 p-4 flex items-center gap-4 flex-wrap hover:border-[#f05742]/30 transition">
+          <div class="w-9 h-9 rounded-lg bg-[#f05742]/10 flex items-center justify-center shrink-0"><i data-lucide="file-text" class="w-4 h-4 text-[#f05742]"></i></div>
+          <div class="min-w-[200px] flex-1">
+            <div class="text-[12.5px] font-semibold">${esc(rv.file)}</div>
+            <div class="text-[11.5px] text-gray-500 mt-0.5 line-clamp-1">${esc(rv.reason)}</div></div>
+          <div class="min-w-[120px]">
+            <div class="text-[11.5px] font-semibold ${pct > 80 ? 'text-red-600' : 'text-gray-600'}">${rv.waitingH}h of ${rv.slaH}h</div>
+            <div class="h-1.5 w-24 rounded-full bg-gray-100 overflow-hidden mt-1">
+              <div class="h-full rounded-full ${pct > 80 ? 'bg-red-500' : pct > 50 ? 'bg-amber-500' : 'bg-green-500'}" style="width:${pct}%"></div></div></div>
+          <button class="px-3 py-1.5 bg-orange-500 hover:bg-orange-600 text-white text-[11.5px] font-bold rounded-lg transition shrink-0" data-ws-review="${esc(rv.reviewId)}">View &amp; Approve</button>
+        </div>`;
+      }).join('')}
+    </div>`
+    : `<div class="rounded-xl border border-green-200 bg-green-50 py-14 text-center">
+        <div class="w-14 h-14 rounded-full bg-white flex items-center justify-center mx-auto mb-3 glow-green"><i data-lucide="check-circle" class="w-7 h-7 text-green-500"></i></div>
+        <div class="font-bold text-[14px] text-green-800">Nothing waiting</div>
+        <div class="text-[12px] text-green-700 mt-1">This agent has no runs paused for review right now.</div></div>`}`;
+}
+
+function wsSettings(a) {
+  const conn = CONNECTORS.find(c => c.agent === a.display);
+  return `
+    <div class="space-y-5 max-w-3xl">
+      <div class="rounded-xl border border-gray-200 p-4">
+        <div class="text-[13px] font-bold mb-1">Trigger</div>
+        <p class="text-[12px] text-gray-500 mb-3">How runs of this agent get started.</p>
+        <div class="space-y-2.5">
+          ${['manual','connector','schedule'].map(k => {
+            const tm = TRIGGER_META[k]; const on = a.trigger === k;
+            return `<div class="flex items-center gap-3 p-3.5 rounded-xl border ${on ? 'border-[#f05742]/30 bg-[#f05742]/[.04]' : 'border-gray-200'}">
+              <div class="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${on ? 'bg-[#f05742] text-white' : 'bg-gray-100 text-gray-400'}">
+                <i data-lucide="${tm.icon}" class="w-4 h-4"></i></div>
+              <div class="flex-1 min-w-0"><div class="text-[12.5px] font-semibold">${tm.label}</div>
+                <div class="text-[11px] text-gray-500 truncate">${k === 'connector' && conn ? esc(conn.name) + ' · ' + esc(conn.folder) : k === 'schedule' ? 'Daily at 08:15' : 'Submitted from Upload &amp; Execute'}</div></div>
+              <span class="w-9 h-5 rounded-full relative shrink-0 ${on ? 'bg-[#f05742]' : 'bg-gray-200'}">
+                <span class="absolute top-0.5 w-4 h-4 rounded-full bg-white ${on ? 'right-0.5' : 'left-0.5'}"></span></span></div>`;
+          }).join('')}
+        </div>
+      </div>
+
+      <div class="rounded-xl border border-gray-200 p-4">
+        <div class="text-[13px] font-bold mb-1">Model configuration</div>
+        <p class="text-[12px] text-gray-500 mb-3">Overrides the platform defaults for this agent only.</p>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div><label class="block text-[12px] font-semibold mb-1.5">OCR engine</label>
+            <select class="input-field">${OCR_ENGINES.map(o => `<option ${o.name === a.ocr ? 'selected' : ''}>${esc(o.name)}</option>`).join('')}</select></div>
+          <div><label class="block text-[12px] font-semibold mb-1.5">Extraction model</label>
+            <select class="input-field">${MODELS.map(m => `<option ${m.name === a.model ? 'selected' : ''}>${esc(m.name)}</option>`).join('')}</select></div>
+        </div>
+      </div>
+
+      <div class="rounded-xl border border-gray-200 p-4">
+        <div class="text-[13px] font-bold mb-1">Versions</div>
+        <p class="text-[12px] text-gray-500 mb-3">Published versions are immutable. Roll back at any time.</p>
+        <div class="divide-y divide-gray-50">
+          ${Array.from({ length: Math.min(3, a.version) }, (_, i) => a.version - i).map((v, i) => `
+            <div class="flex items-center gap-3 py-2.5">
+              <span class="step-dot ${i === 0 ? 'completed' : ''}"></span>
+              <span class="font-mono text-[12px] font-semibold">v${v}</span>
+              ${i === 0 ? pill('Live','green') : ''}
+              <span class="text-[11.5px] text-gray-400 flex-1">${i === 0 ? 'Published ' + fmtDate(a.updated) : 'Superseded'}</span>
+              ${i === 0 ? '' : `<button class="btn-secondary !py-1 !text-[11px]" data-action="toast" data-msg="Rolled back to v${v}"><i data-lucide="rotate-ccw" class="w-3 h-3"></i>Roll back</button>`}
+            </div>`).join('')}
+        </div>
+      </div>
+
+      <div class="rounded-xl border border-red-200 bg-red-50/50 p-4">
+        <div class="text-[13px] font-bold text-red-800 mb-1">Danger zone</div>
+        <p class="text-[12px] text-red-700 mb-3">Deleting removes the agent and all of its configuration versions. Run history is retained for audit.</p>
+        <div class="flex gap-2 flex-wrap">
+          <button class="btn-secondary" data-action="toast" data-msg="Agent set to Inactive — connectors will stop triggering it" data-tone="info"><i data-lucide="pause" class="w-4 h-4"></i>Deactivate</button>
+          <button class="btn-primary !bg-none !bg-red-600" data-ws-delete="${a.id}"><i data-lucide="trash-2" class="w-4 h-4"></i>Delete agent</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+const WS_BODY = {
+  overview: wsOverview, configure: wsConfigure, runs: wsRuns, reviews: wsReviews, settings: wsSettings,
+  workbench: (a) => (WORKBENCH[a.type] || wbCustom)(a),
+};
+
+SCREENS['/agent'] = (route) => {
+  const parts = route.split('/');
+  const a = AGENTS.find(x => x.id === parts[2]) || AGENTS[0];
+  const tab = WS_TABS.some(t => t.key === parts[3]) ? parts[3] : STATE.wsTab;
+  STATE.wsTab = tab;
+  const t = AGENT_TYPE[a.type];
+  const reviewCount = REVIEWS.filter(r => r.agentId === a.id).length;
+  const runCount = RUNS.filter(r => r.agentId === a.id).length;
+
+  return page(`
+    <div class="flex items-center gap-1.5 text-[12px] text-gray-400 mb-4">
+      <button class="hover:text-[#f05742] font-medium" data-action="nav" data-route="/agents">Agents</button>
+      <i data-lucide="chevron-right" class="w-3 h-3"></i>
+      <span class="text-gray-600 font-medium">${esc(a.display)} (${esc(t.title)})</span>
+    </div>
+
+    <div class="flex items-start justify-between gap-4 mb-5 flex-wrap">
+      <div class="flex items-start gap-3.5">
+        <div class="w-12 h-12 rounded-xl flex items-center justify-center shrink-0" style="background:${t.color}18">
+          <i data-lucide="${t.icon}" class="w-6 h-6" style="color:${t.color}"></i></div>
+        <div>
+          <h1 class="text-[24px] font-bold leading-tight">${esc(a.display)}</h1>
+          <div class="flex items-center gap-1.5 flex-wrap mt-2">
+            ${typeChip(a.type)} ${agentBadge(a.status)} ${pill('v' + a.version, 'gray')}
+            ${pill(`<i data-lucide="${TRIGGER_META[a.trigger].icon}" class="w-3 h-3"></i>${TRIGGER_META[a.trigger].label}`, TRIGGER_META[a.trigger].tone)}
+            <span class="text-[11px] text-gray-400 font-mono ml-1">${esc(a.name)}</span>
+          </div>
+        </div>
+      </div>
+      <div class="flex items-center gap-2">
+        <button class="btn-secondary" data-action="nav" data-route="/playground"><i data-lucide="flask-conical" class="w-4 h-4"></i>Playground</button>
+        <button class="btn-primary" data-action="nav" data-route="/upload"><i data-lucide="play" class="w-4 h-4"></i>Run this agent</button>
+      </div>
+    </div>
+
+    <div class="flex gap-5 items-start flex-col lg:flex-row">
+      <nav class="w-full lg:w-[210px] shrink-0 bg-white rounded-2xl border border-gray-100 shadow-sm p-2">
+        ${WS_TABS.map(tb => {
+          const on = tab === tb.key;
+          const badge = tb.key === 'reviews' ? reviewCount : tb.key === 'runs' ? runCount : null;
+          return `<button data-ws-tab="${tb.key}" class="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-xl text-left transition mb-0.5 ${on ? 'bg-[#f05742]/10 text-[#f05742] font-semibold' : 'text-gray-600 hover:bg-gray-50'}">
+            <i data-lucide="${tb.icon}" class="w-4 h-4 shrink-0"></i>
+            <span class="text-[13px] flex-1">${tb.key === 'workbench' ? esc(t.workbench) : tb.label}</span>
+            ${badge ? `<span class="text-[10px] font-bold px-1.5 py-0.5 rounded-full ${on ? 'bg-[#f05742] text-white' : 'bg-gray-100 text-gray-500'}">${badge}</span>` : ''}
+          </button>`;
+        }).join('')}
+      </nav>
+
+      <div class="flex-1 min-w-0 bg-white rounded-2xl border border-gray-100 shadow-sm p-5 sm:p-6">
+        ${(WS_BODY[tab] || wsOverview)(a)}
+      </div>
+    </div>
+  `);
+};
+
+AFTER['/agent'] = () => {
+  $('#screen').addEventListener('click', (e) => {
+    const tb = e.target.closest('[data-ws-tab]');
+    if (tb) {
+      const id = currentRoute().split('/')[2];
+      location.hash = '#/agent/' + id + '/' + tb.getAttribute('data-ws-tab');
+      return;
+    }
+    const rv = e.target.closest('[data-ws-review]');
+    if (rv) { STATE.reviewSearch = ''; openReviewModal(rv.getAttribute('data-ws-review')); return; }
+    const del = e.target.closest('[data-ws-delete]');
+    if (del) {
+      const a = AGENTS.find(x => x.id === del.getAttribute('data-ws-delete'));
+      openModal(`<div class="bg-white rounded-2xl p-6">
+        <div class="flex items-start gap-3">
+          <div class="w-11 h-11 rounded-xl bg-red-50 flex items-center justify-center shrink-0"><i data-lucide="alert-triangle" class="w-5 h-5 text-red-500"></i></div>
+          <div><h3 class="font-bold text-[16px]">Delete this agent?</h3>
+            <p class="text-[13px] text-gray-500 mt-1.5"><b>${esc(a.display)}</b> and its ${a.version} configuration versions will be removed. Run history is retained for audit. This cannot be undone.</p></div>
+        </div>
+        <div class="flex justify-end gap-2 mt-6">
+          <button class="btn-secondary" data-action="close-modal">Cancel</button>
+          <button class="btn-primary !bg-none !bg-red-600" data-action="close-modal" onclick="toast('Agent deleted','error')">Yes, delete</button>
+        </div></div>`);
     }
   });
 };
@@ -1968,48 +2592,13 @@ AFTER['/run'] = () => {
 /* ================================================================
    AGENT BUILDER
    ================================================================ */
-const BUILDER_STEPS = {
-  extraction: [
-    { key:'setup',      title:'Initial Setup',       sub:'Name, industry and operation type' },
-    { key:'input',      title:'Input',               sub:'Accepted file formats and limits' },
-    { key:'classify',   title:'Document Validation', sub:'Identity and scope boundaries' },
-    { key:'schema',     title:'Field Schema',        sub:'Define the fields to extract' },
-    { key:'validation', title:'Data Validation',     sub:'Rules and review triggers' },
-    { key:'output',     title:'Output',              sub:'Destinations and delivery' },
-    { key:'review',     title:'Review',              sub:'Confirm and publish' },
-  ],
-  summarization: [
-    { key:'setup', title:'Initial Setup', sub:'Name, industry and operation type' },
-    { key:'input', title:'Input', sub:'Accepted file formats' },
-    { key:'classify', title:'Document Validation', sub:'Identity and scope' },
-    { key:'summary', title:'Summary Config', sub:'Sections and format' },
-    { key:'validation', title:'Data Validation', sub:'Rules and triggers' },
-    { key:'output', title:'Output', sub:'Destinations' },
-    { key:'review', title:'Review', sub:'Confirm and publish' },
-  ],
-  classification: [
-    { key:'setup', title:'Initial Setup', sub:'Name, industry and operation type' },
-    { key:'input', title:'Input', sub:'Accepted file formats' },
-    { key:'classify', title:'Document Validation', sub:'Types and scope boundaries' },
-    { key:'validation', title:'Data Validation', sub:'Rules and triggers' },
-    { key:'output', title:'Output', sub:'Destinations' },
-    { key:'review', title:'Review', sub:'Confirm and publish' },
-  ],
-  validation: [
-    { key:'setup', title:'Initial Setup', sub:'Name, industry and operation type' },
-    { key:'input', title:'Input', sub:'The document set to compare' },
-    { key:'classify', title:'Document Validation', sub:'Required document types' },
-    { key:'schema', title:'Field Mapping', sub:'Which field matches which' },
-    { key:'validation', title:'Match Rules', sub:'Tolerances and review triggers' },
-    { key:'output', title:'Output', sub:'Exception report destinations' },
-    { key:'review', title:'Review', sub:'Confirm and publish' },
-  ],
-};
-const OPERATION_TYPES = [
-  { id:'extraction',     icon:'scan-text',   title:'Data Extraction',   blurb:'Pull structured fields and line items out of a document.' },
-  { id:'classification', icon:'shapes',      title:'Classification',    blurb:'Identify what each document is before processing it.' },
-  { id:'summarization',  icon:'text-quote',  title:'Summarization',     blurb:'Condense long documents into a structured summary.' },
-  { id:'validation',     icon:'git-compare', title:'Cross-Doc Validation', blurb:'Compare two or more documents and flag variance.' },
+/* Four stages, not a seven-step wizard. The Configure stage is what changes
+   per agent type — everything either side of it is identical. */
+const BUILD_STAGES = [
+  { key:'type',      title:'Choose type',        sub:'What kind of agent are you building' },
+  { key:'configure', title:'Configure',          sub:'Settings specific to this agent type' },
+  { key:'test',      title:'Test in Playground', sub:'Run it against a real document first' },
+  { key:'publish',   title:'Publish the version',sub:'Make it available to connectors and the API' },
 ];
 const SCHEMA_FIELDS = [
   { name:'invoice_number', label:'Invoice Number', type:'string',   req:true,  desc:'Supplier invoice reference, top-right of the header block' },
@@ -2301,186 +2890,463 @@ function flowSvg() {
   </svg>`;
 }
 
+/* ---- Type-specific Configure data ---- */
+const CLAIM_DOCS = [
+  ['Claim form', true, 'The signed claim submission itself'],
+  ['Policy schedule', true, 'To confirm cover was active on the date of loss'],
+  ['Invoices / receipts', true, 'Evidence of the amount claimed'],
+  ['Photographs of damage', false, 'Optional, used for motor and property claims'],
+  ['Police / incident report', false, 'Required only above the escalation threshold'],
+];
+const CLAIM_RULES = [
+  ['Policy active on date of loss', 'Compare date of loss against the policy period.'],
+  ['Claim within the sum insured', 'Claimed amount must not exceed the remaining sum insured.'],
+  ['Excess applied', 'Deduct the policy excess before recommending a payable figure.'],
+  ['Duplicate claim check', 'Flag if the same claim number or loss date was already processed.'],
+  ['Route above SGD 10,000 to review', 'High-value claims always get a human decision.'],
+];
+const CUSTOM_PROMPT_DEFAULT =
+`We receive lease agreements and direct debit authorisation forms from customers as one scanned PDF bundle.
+
+For each bundle I need you to:
+1. Split the bundle and work out which pages are the lease and which are the DDA form.
+2. From the lease, pull the lessee name, property address, lease start and end dates, monthly rent and the deposit amount.
+3. From the DDA form, pull the bank name, account holder, account number and the signature date.
+4. Check that the lessee name on the lease matches the account holder on the DDA form. If they differ, stop and send it to a human.
+5. Check the DDA signature date is not more than 30 days before the lease start date.
+6. When everything passes, send the result to our onboarding API. When it does not, put it in the review queue with the reason.`;
+
+const CUSTOM_SUMMARY = [
+  ['Accepts', 'A single scanned PDF bundle, up to 15 MB, containing a lease agreement and a direct debit authorisation form.'],
+  ['Step 1 — Classify', 'Each page is classified as either Lease Agreement or DDA Form so the two documents can be handled separately.'],
+  ['Step 2 — Extract lease', 'Lessee name, property address, lease start date, lease end date, monthly rent and deposit amount.'],
+  ['Step 3 — Extract DDA', 'Bank name, account holder, account number and signature date.'],
+  ['Step 4 — Cross-check names', 'The lessee name is compared against the DDA account holder. A mismatch halts the run and raises a human review.'],
+  ['Step 5 — Cross-check dates', 'The DDA signature date must fall within 30 days before the lease start date.'],
+  ['On success', 'The combined record is posted to the onboarding API and the run is marked complete.'],
+  ['On failure', 'The run pauses at a review gate with the failing check named, rather than failing silently.'],
+];
+
+function typeChip(typeId, extra) {
+  const t = AGENT_TYPE[typeId] || AGENT_TYPE.custom;
+  return '<span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-semibold border ' + (extra || '') + '" '
+    + 'style="color:' + t.color + ';background:' + t.color + '14;border-color:' + t.color + '38">'
+    + '<i data-lucide="' + t.icon + '" class="w-3 h-3"></i>' + t.title + '</span>';
+}
+
+/* ---- Configure bodies, one per agent type ---- */
+function configureBody(typeId) {
+  const common = `
+    <div class="grid grid-cols-1 md:grid-cols-12 gap-4 pb-5 mb-5 border-b border-gray-100">
+      <div class="md:col-span-5"><label class="block text-[12px] font-semibold mb-1.5">Agent name <span class="text-[#f05742]">*</span></label>
+        <input class="input-field" value="${esc(BUILDER_DEFAULT_NAME[typeId] || 'new_agent')}" /></div>
+      <div class="md:col-span-3"><label class="block text-[12px] font-semibold mb-1.5">Industry</label>
+        <select class="input-field">${['Retail','Finance','Healthcare','Insurance','Legal','Logistics','Other'].map(i => `<option>${i}</option>`).join('')}</select></div>
+      <div class="md:col-span-4"><label class="block text-[12px] font-semibold mb-1.5">Owner</label>
+        <select class="input-field"><option>Arun Kumar (Admin)</option><option>Priya Nandini (Manager)</option><option>Wei Lim (Manager)</option></select></div>
+    </div>`;
+
+  if (typeId === 'reconciliation') {
+    const r = RECIPES.find(x => x.id === STATE.builderRecipe) || RECIPES[0];
+    return common + `
+      <div class="space-y-6">
+        <div>
+          <div class="text-[13px] font-bold mb-1">Document pair</div>
+          <p class="text-[12px] text-gray-500 mb-3">The two sides you want reconciled. Either side can be a PDF, a CSV or a spreadsheet.</p>
+          <div class="flex items-center gap-2 flex-wrap mb-3">
+            ${RECIPES.map(x => `<button data-builder-recipe="${x.id}" class="px-3 py-1.5 rounded-lg text-[12px] font-semibold border transition ${r.id === x.id ? 'bg-[#f05742] text-white border-[#f05742]' : 'bg-white border-gray-200 text-gray-600 hover:border-gray-300'}">${esc(x.industry)} · ${esc(x.sub)}</button>`).join('')}
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            ${[[r.a, 'A', '#f05742'], [r.b, 'B', '#3b82f6']].map(([doc, letter, color]) => `
+              <div class="rounded-xl border-2 p-4" style="border-color:${color}44;background:${color}08">
+                <div class="flex items-center gap-2 mb-2.5">
+                  <span class="w-6 h-6 rounded-lg text-white text-[11px] font-bold flex items-center justify-center" style="background:${color}">${letter}</span>
+                  <input class="bg-transparent text-[13px] font-bold outline-none flex-1 min-w-0" value="${esc(doc.label)}" /></div>
+                <div class="flex flex-wrap gap-1.5">${doc.fields.map(f => `<span class="px-2 py-0.5 rounded-md bg-white border border-gray-200 text-[11px] font-medium">${esc(f)}</span>`).join('')}
+                  <button class="px-2 py-0.5 rounded-md border border-dashed border-gray-300 text-[11px] text-gray-400 hover:border-gray-400">+ field</button></div>
+              </div>`).join('')}
+          </div>
+        </div>
+
+        <div>
+          <div class="text-[13px] font-bold mb-1">Field mapping</div>
+          <p class="text-[12px] text-gray-500 mb-3">Which field on side A corresponds to which field on side B, and how strictly they must agree.</p>
+          <div class="overflow-x-auto rounded-xl border border-gray-200">
+            <table class="dt w-full">
+              <thead class="bg-gray-50 border-b border-gray-200"><tr>
+                <th class="text-left px-4 py-2.5">${esc(r.a.label)}</th><th class="px-2 py-2.5"></th>
+                <th class="text-left px-4 py-2.5">${esc(r.b.label)}</th>
+                <th class="text-left px-4 py-2.5 w-52">Match type</th><th class="text-left px-4 py-2.5 w-44">Tolerance</th>
+                <th class="w-10"></th></tr></thead>
+              <tbody class="divide-y divide-gray-50">
+                ${r.map.map(m => `<tr>
+                  <td class="px-4 py-2"><select class="input-field !py-1.5 !text-[12px]">${r.a.fields.map(f => `<option ${f === m.a ? 'selected' : ''}>${esc(f)}</option>`).join('')}</select></td>
+                  <td class="px-2 py-2 text-center text-gray-300"><i data-lucide="arrow-right" class="w-3.5 h-3.5 inline"></i></td>
+                  <td class="px-4 py-2"><select class="input-field !py-1.5 !text-[12px]">${r.b.fields.map(f => `<option ${f === m.b ? 'selected' : ''}>${esc(f)}</option>`).join('')}</select></td>
+                  <td class="px-4 py-2"><select class="input-field !py-1.5 !text-[12px]">
+                    ${['Exact','Numeric ± tolerance','Date ± window','Fuzzy text'].map(t => `<option ${t === m.type ? 'selected' : ''}>${t}</option>`).join('')}</select></td>
+                  <td class="px-4 py-2"><input class="input-field !py-1.5 !text-[12px] font-mono" value="${esc(m.tol || '—')}" /></td>
+                  <td class="px-2 py-2"><button class="p-1 rounded hover:bg-red-50 text-gray-300 hover:text-red-500"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button></td>
+                </tr>`).join('')}
+              </tbody></table>
+          </div>
+          <button class="btn-secondary mt-3" data-action="toast" data-msg="New mapping row added"><i data-lucide="plus" class="w-4 h-4"></i>Add mapping</button>
+        </div>
+
+        <div>
+          <div class="text-[13px] font-bold mb-1">Matching window</div>
+          <p class="text-[12px] text-gray-500 mb-3">Settlement and bank files carry transactions from two or three days earlier. Without a window, that lag reads as an unmatched record.</p>
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div><label class="block text-[12px] font-semibold mb-1.5">Date tolerance</label>
+              <div class="flex items-center gap-2"><input class="input-field" value="${r.tolDays}" /><span class="text-[12px] text-gray-500 whitespace-nowrap">days</span></div></div>
+            <div><label class="block text-[12px] font-semibold mb-1.5">Amount tolerance</label>
+              <input class="input-field font-mono text-[12px]" value="0.05" /></div>
+            <div><label class="block text-[12px] font-semibold mb-1.5">Fuzzy threshold</label>
+              <input class="input-field font-mono text-[12px]" value="0.82" /></div>
+          </div>
+        </div>
+
+        <div>
+          <div class="text-[13px] font-bold mb-1">Exception routing</div>
+          <p class="text-[12px] text-gray-500 mb-3">What happens to the records that do not cleanly match.</p>
+          <div class="space-y-2.5">
+            ${[['Discrepant — amounts differ within tolerance', 'Flag on the report', true],
+               ['Needs review — matched below the fuzzy threshold', 'Send to the review queue', true],
+               ['Unmatched — no counterpart found in the window', 'Send to the review queue', true],
+               ['Counterpart with no source record', 'Flag on the report', false]].map(([label, action, on]) => `
+              <div class="flex items-center gap-3 p-3.5 rounded-xl border ${on ? 'border-[#f05742]/25 bg-[#f05742]/[.04]' : 'border-gray-200'}">
+                <span class="w-9 h-5 rounded-full relative shrink-0 ${on ? 'bg-[#f05742]' : 'bg-gray-200'}">
+                  <span class="absolute top-0.5 w-4 h-4 rounded-full bg-white ${on ? 'right-0.5' : 'left-0.5'}"></span></span>
+                <span class="text-[12.5px] font-medium flex-1">${label}</span>
+                ${pill(action, on ? 'brand' : 'gray')}</div>`).join('')}
+          </div>
+        </div>
+      </div>`;
+  }
+
+  if (typeId === 'claims') {
+    return common + `
+      <div class="space-y-6">
+        <div>
+          <div class="text-[13px] font-bold mb-1">Required documents</div>
+          <p class="text-[12px] text-gray-500 mb-3">The agent classifies the incoming pack and refuses to proceed if a required document is missing.</p>
+          <div class="space-y-2">
+            ${CLAIM_DOCS.map(([name, req, why]) => `
+              <div class="flex items-start gap-3 p-3.5 rounded-xl border ${req ? 'border-[#3b82f6]/25 bg-blue-50/40' : 'border-gray-200'}">
+                <i data-lucide="${req ? 'check-circle' : 'circle'}" class="w-4 h-4 mt-0.5 shrink-0 ${req ? 'text-blue-500' : 'text-gray-300'}"></i>
+                <div class="flex-1 min-w-0"><div class="text-[12.5px] font-semibold">${esc(name)}</div>
+                  <div class="text-[11.5px] text-gray-500 mt-0.5">${esc(why)}</div></div>
+                ${req ? pill('Required','blue') : pill('Optional','gray')}</div>`).join('')}
+          </div>
+        </div>
+
+        <div>
+          <div class="text-[13px] font-bold mb-1">Fields to capture</div>
+          <p class="text-[12px] text-gray-500 mb-3">Pulled from across the pack and merged into one claim record.</p>
+          <div class="flex flex-wrap gap-2">
+            ${['Claim Number','Policy Number','Insured Name','Date of Loss','Loss Description','Claim Amount','Excess','Sum Insured','Payee Bank Account','Assessor Notes']
+              .map(f => `<span class="px-2.5 py-1 rounded-lg bg-gray-50 border border-gray-200 text-[12px] font-medium flex items-center gap-1.5">${esc(f)}
+                <button class="text-gray-300 hover:text-red-500"><i data-lucide="x" class="w-3 h-3"></i></button></span>`).join('')}
+            <button class="px-2.5 py-1 rounded-lg border border-dashed border-gray-300 text-[12px] text-gray-400 hover:border-gray-400">+ Add field</button>
+          </div>
+        </div>
+
+        <div>
+          <div class="text-[13px] font-bold mb-1">Coverage rules</div>
+          <p class="text-[12px] text-gray-500 mb-3">Written in plain English. Each one compiles into a validation step.</p>
+          <div class="space-y-2.5">
+            ${CLAIM_RULES.map(([name, desc]) => `
+              <div class="flex items-start gap-3 p-3.5 rounded-xl border border-gray-200">
+                <span class="w-9 h-5 rounded-full bg-[#f05742] relative shrink-0 mt-0.5"><span class="absolute right-0.5 top-0.5 w-4 h-4 rounded-full bg-white"></span></span>
+                <div class="flex-1 min-w-0"><div class="text-[12.5px] font-semibold">${esc(name)}</div>
+                  <div class="text-[11.5px] text-gray-500 mt-0.5">${esc(desc)}</div></div></div>`).join('')}
+          </div>
+          <button class="btn-secondary mt-3" data-action="toast" data-msg="Describe the rule in plain English and it compiles to a validation step"><i data-lucide="plus" class="w-4 h-4"></i>Add rule</button>
+        </div>
+
+        <div>
+          <div class="text-[13px] font-bold mb-1">Decision thresholds</div>
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-3">
+            <div><label class="block text-[12px] font-semibold mb-1.5">Auto-approve below</label>
+              <input class="input-field font-mono text-[12px]" value="SGD 2,000.00" /></div>
+            <div><label class="block text-[12px] font-semibold mb-1.5">Always review above</label>
+              <input class="input-field font-mono text-[12px]" value="SGD 10,000.00" /></div>
+            <div><label class="block text-[12px] font-semibold mb-1.5">Review SLA</label>
+              <select class="input-field"><option>24 hours</option><option selected>48 hours</option><option>72 hours</option></select></div>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  if (typeId === 'invoice-validator') {
+    return common + `
+      <div class="space-y-6">
+        <div>
+          <div class="flex items-center justify-between mb-1 flex-wrap gap-2">
+            <div><div class="text-[13px] font-bold">Fields to capture</div>
+              <div class="text-[12px] text-gray-500">${SCHEMA_FIELDS.length} fields · drag to reorder</div></div>
+            <button class="btn-secondary" data-builder-autoschema><i data-lucide="sparkles" class="w-4 h-4"></i>Auto-generate from a sample</button>
+          </div>
+          <div class="space-y-2 mt-3">
+            ${SCHEMA_FIELDS.map(f => `
+              <div class="flex items-start gap-3 p-3 rounded-xl border border-gray-200 bg-white hover:border-[#f05742]/30 transition group">
+                <i data-lucide="grip-vertical" class="w-4 h-4 text-gray-300 mt-1 cursor-grab shrink-0"></i>
+                <div class="flex-1 min-w-0 grid grid-cols-1 md:grid-cols-12 gap-3 items-start">
+                  <div class="md:col-span-4"><div class="text-[12.5px] font-semibold flex items-center gap-1.5">${esc(f.label)}
+                    ${f.req ? '<span class="text-[#f05742] text-[15px] leading-none">*</span>' : ''}</div>
+                    <div class="text-[10.5px] text-gray-400 font-mono">${esc(f.name)}</div></div>
+                  <div class="md:col-span-2">${pill(f.type, f.type === 'currency' ? 'green' : f.type === 'date' ? 'blue' : f.type === 'array' ? 'purple' : 'gray')}</div>
+                  <div class="md:col-span-6 text-[11.5px] text-gray-500 leading-snug">${esc(f.desc)}</div>
+                </div>
+                <button class="p-1.5 rounded-lg opacity-0 group-hover:opacity-100 hover:bg-red-50 text-gray-400 hover:text-red-500 transition shrink-0"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
+              </div>`).join('')}
+          </div>
+        </div>
+
+        <div>
+          <div class="text-[13px] font-bold mb-1">Validation rules</div>
+          <p class="text-[12px] text-gray-500 mb-3">Arithmetic and business checks run after extraction, before anything is posted.</p>
+          <div class="space-y-2.5">
+            ${VALIDATION_RULES.map(r => `
+              <div class="flex items-start gap-3 p-3.5 rounded-xl border ${r.builtin ? 'border-gray-200 bg-gray-50/60' : 'border-[#f05742]/25 bg-[#f05742]/[.03]'}">
+                <span class="w-9 h-5 rounded-full bg-[#f05742] relative shrink-0 mt-0.5"><span class="absolute right-0.5 top-0.5 w-4 h-4 rounded-full bg-white"></span></span>
+                <div class="flex-1 min-w-0"><div class="text-[12.5px] font-semibold flex items-center gap-2">${esc(r.name)}
+                  ${r.builtin ? pill('Built-in','gray') : pill('Custom','brand')}</div>
+                  <div class="text-[11.5px] text-gray-500 mt-0.5">${esc(r.desc)}</div></div></div>`).join('')}
+          </div>
+          <button class="btn-secondary mt-3" data-action="toast" data-msg="Describe the rule in plain English and it compiles to a validation step"><i data-lucide="plus" class="w-4 h-4"></i>Add rule</button>
+        </div>
+
+        <div>
+          <div class="text-[13px] font-bold mb-1">Approval and delivery</div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-3 mb-3">
+            <div><label class="block text-[12px] font-semibold mb-1.5">Auto-post below</label>
+              <input class="input-field font-mono text-[12px]" value="SGD 5,000.00" /></div>
+            <div><label class="block text-[12px] font-semibold mb-1.5">Confidence gate</label>
+              <input class="input-field font-mono text-[12px]" value="0.85" /></div>
+          </div>
+          <div class="space-y-2.5">
+            ${[['Store in DocsAI','database',true,'Structured JSON retained for 180 days with full lineage.'],
+               ['Post to the ERP','webhook',true,'POST https://erp.internal/api/ap/invoices'],
+               ['Email the AP team on hold','mail',false,'ap-team@tecksang.com.sg']].map(([label, icon, on, sub]) => `
+              <div class="flex items-start gap-3 p-3.5 rounded-xl border ${on ? 'border-[#f05742]/30 bg-[#f05742]/[.04]' : 'border-gray-200'}">
+                <div class="w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${on ? 'bg-[#f05742] text-white' : 'bg-gray-100 text-gray-400'}">
+                  <i data-lucide="${icon}" class="w-4 h-4"></i></div>
+                <div class="flex-1 min-w-0"><div class="text-[12.5px] font-semibold">${label}</div>
+                  <div class="text-[11px] text-gray-500 font-mono mt-0.5 truncate">${sub}</div></div>
+                <span class="w-9 h-5 rounded-full relative shrink-0 mt-1 ${on ? 'bg-[#f05742]' : 'bg-gray-200'}">
+                  <span class="absolute top-0.5 w-4 h-4 rounded-full bg-white ${on ? 'right-0.5' : 'left-0.5'}"></span></span></div>`).join('')}
+          </div>
+        </div>
+      </div>`;
+  }
+
+  /* ---- Custom: plain language in, preview out ---- */
+  return common + `
+    <div class="space-y-5">
+      <div>
+        <div class="text-[13px] font-bold mb-1">Enter the detailed requirement in a simple language</div>
+        <p class="text-[12px] text-gray-500 mb-3">Write it the way you would explain it to a new colleague. Name the documents, the fields you need, the checks that matter and what should happen when a check fails.</p>
+        <textarea id="custom-req" class="input-field !text-[12.5px] leading-relaxed" rows="12">${esc(CUSTOM_PROMPT_DEFAULT)}</textarea>
+        <div class="flex items-center gap-3 mt-3 flex-wrap">
+          <button class="btn-primary" data-builder-generate>
+            <i data-lucide="${STATE.builderGenerated ? 'rotate-cw' : 'sparkles'}" class="w-4 h-4"></i>
+            ${STATE.builderGenerated ? 'Regenerate configuration' : 'Generate configuration'}</button>
+          <span class="text-[11.5px] text-gray-400">Uses a reasoning model · roughly 0.4 credits</span>
+        </div>
+      </div>
+
+      ${STATE.builderGenerated ? `
+      <div class="rounded-2xl border border-gray-200 overflow-hidden">
+        <div class="flex items-center gap-1 px-4 pt-3 border-b border-gray-100 bg-gray-50/60">
+          <span class="text-[11px] font-bold uppercase tracking-wider text-gray-400 mr-3 pb-2.5">Preview</span>
+          ${[['summary','Text Summary','file-text'],['flow','Flow','git-branch'],['yaml','YAML','file-code']].map(([k, label, icon]) => `
+            <button data-builder-preview="${k}" class="px-3.5 py-2.5 text-[12.5px] font-semibold border-b-2 flex items-center gap-1.5 transition ${STATE.builderPreview === k ? 'border-[#f05742] text-[#f05742]' : 'border-transparent text-gray-500 hover:text-gray-700'}">
+              <i data-lucide="${icon}" class="w-3.5 h-3.5"></i>${label}</button>`).join('')}
+        </div>
+        <div class="p-5">
+          ${STATE.builderPreview === 'yaml' ? `
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-[12px] text-gray-500">11 steps compiled · all 7 validators passed</span>
+              <button class="btn-ghost !py-1" data-action="toast" data-msg="YAML copied"><i data-lucide="copy" class="w-3.5 h-3.5"></i>Copy</button></div>
+            <pre class="bg-[#1e1e2e] rounded-xl p-4 text-[11.5px] font-mono overflow-x-auto max-h-[420px] leading-relaxed text-gray-300">${yamlHi(AGENT_YAML)}</pre>`
+          : STATE.builderPreview === 'flow' ? `
+            <p class="text-[12px] text-gray-500 mb-3">This is what your description compiled to. Every branch and fallback shown here came from a sentence you wrote.</p>
+            <div class="rounded-xl border border-gray-200 bg-gray-50/60 p-4 overflow-x-auto">${flowSvg()}</div>
+            <div class="flex items-center gap-4 flex-wrap mt-4 text-[11.5px] text-gray-500">
+              <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded bg-[#fff0ed] border border-[#f05742]"></span>Processing step</span>
+              <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded bg-[#faf5ff] border border-purple-500"></span>Condition</span>
+              <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded bg-[#fffbeb] border border-amber-500"></span>Human review gate</span>
+              <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded bg-[#ecfdf5] border border-emerald-500"></span>Output</span>
+              <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded bg-gray-50 border border-dashed border-gray-400"></span>Fallback</span>
+            </div>`
+          : `
+            <p class="text-[12px] text-gray-500 mb-4">Read this back before you test. If a line here is wrong, edit your description rather than the YAML.</p>
+            <div class="space-y-2.5">
+              ${CUSTOM_SUMMARY.map(([k, v]) => `
+                <div class="flex items-start gap-3 p-3 rounded-xl border border-gray-100 bg-gray-50/50">
+                  <span class="px-2 py-0.5 rounded-md bg-white border border-gray-200 text-[10.5px] font-bold uppercase tracking-wider text-gray-500 shrink-0 mt-0.5" style="min-width:104px;text-align:center">${esc(k)}</span>
+                  <span class="text-[12.5px] text-gray-700 leading-relaxed">${esc(v)}</span></div>`).join('')}
+            </div>
+            <div class="mt-4 p-3.5 rounded-xl bg-amber-50 border border-amber-200 flex gap-2.5">
+              <i data-lucide="alert-triangle" class="w-4 h-4 text-amber-600 shrink-0 mt-0.5"></i>
+              <div class="text-[12px] text-amber-900 leading-relaxed">Two things were inferred rather than stated: the 15 MB size ceiling and the 30-day signature window direction. Confirm both before publishing.</div>
+            </div>`}
+        </div>
+      </div>` : `
+      <div class="rounded-2xl border-2 border-dashed border-gray-200 p-10 text-center">
+        <div class="w-12 h-12 rounded-xl bg-gray-100 flex items-center justify-center mx-auto mb-3">
+          <i data-lucide="wand-2" class="w-5 h-5 text-gray-400"></i></div>
+        <div class="text-[13px] font-semibold text-gray-600">No configuration generated yet</div>
+        <div class="text-[12px] text-gray-400 mt-1 max-w-md mx-auto">Once you generate, you will see the same requirement three ways — as a plain text summary, as a flow diagram and as the YAML that actually runs.</div>
+      </div>`}
+    </div>`;
+}
+
+const BUILDER_DEFAULT_NAME = {
+  reconciliation:     'daily_sales_settlement_recon',
+  claims:             'motor_claim_assessment',
+  'invoice-validator':'supplier_invoice_validator',
+  custom:             'lease_dda_onboarding',
+};
+
+/* ---- Test stage ---- */
+function builderTestPanel() {
+  if (!STATE.builderTestState) {
+    return `<div class="rounded-2xl border-2 border-dashed border-[#f05742]/35 p-8 text-center bg-[#f05742]/[.03]">
+      <div class="w-12 h-12 rounded-xl bg-[#f05742]/10 flex items-center justify-center mx-auto mb-3">
+        <i data-lucide="flask-conical" class="w-5 h-5 text-[#f05742]"></i></div>
+      <div class="text-[13.5px] font-semibold">Run it once before you publish</div>
+      <div class="text-[12px] text-gray-500 mt-1 max-w-md mx-auto">A test run is recorded separately from production. It never touches your live metrics or your downstream systems.</div>
+      <button class="btn-primary mx-auto mt-4" data-builder-test><i data-lucide="play" class="w-4 h-4"></i>Run test</button>
+    </div>`;
+  }
+  const done = STATE.builderTestState === 'done';
+  const pct = done ? 100 : STATE.builderTestPct;
+  const stageIdx = done ? PLAY_STAGES.length : Math.min(PLAY_STAGES.length - 1, Math.floor(pct / 26));
+  return `
+    <div class="rounded-2xl border border-gray-200 p-5">
+      <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
+        <div><div class="text-[13.5px] font-bold">${done ? 'Test run complete' : 'Running test…'}</div>
+          <div class="text-[11.5px] text-gray-400 font-mono">run_9c4f1a2b · TEST mode</div></div>
+        ${done ? pill('<i data-lucide="check-circle" class="w-3 h-3"></i>Passed','green')
+               : `<span class="chip bg-[#f05742]/10 text-[#f05742] border border-[#f05742]/25"><i data-lucide="loader" class="w-3 h-3 spin"></i>Running</span>`}
+      </div>
+      <div class="space-y-3">
+        ${PLAY_STAGES.map((s, i) => {
+          const st = i < stageIdx ? 'done' : i === stageIdx ? 'running' : 'todo';
+          return `<div class="flex items-center gap-3">
+            <div class="w-9 h-9 rounded-full flex items-center justify-center shrink-0 border-2
+              ${st === 'done' ? 'bg-green-500 border-green-500' : st === 'running' ? 'bg-white border-[#f05742]' : 'bg-white border-gray-200'}">
+              <i data-lucide="${st === 'done' ? 'check' : st === 'running' ? 'loader' : 'shield'}"
+                 class="w-4 h-4 ${st === 'done' ? 'text-white' : st === 'running' ? 'text-[#f05742] spin' : 'text-gray-300'}"></i></div>
+            <div class="flex-1 min-w-0"><div class="text-[12.5px] font-semibold ${st === 'todo' ? 'text-gray-400' : ''}">${s.label}</div>
+              <div class="text-[11px] text-gray-400">${s.sub}</div></div>
+          </div>`;
+        }).join('')}
+      </div>
+      <div class="mt-4">
+        <div class="h-2 rounded-full bg-gray-100 overflow-hidden">
+          <div class="h-full rounded-full bg-gradient-to-r from-[#f05742] to-[#ff6b58] transition-all duration-500" style="width:${pct}%"></div></div>
+      </div>
+    </div>
+    ${done ? `
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
+      ${[['Fields captured','9 of 9','list'],['Mean confidence','0.94','gauge'],
+         ['Time taken','21.4s','timer'],['Credits used','4.2','coins']].map(([k, v, icon]) => `
+        <div class="rounded-xl border border-gray-200 p-3.5">
+          <div class="flex items-center gap-1.5 text-gray-400"><i data-lucide="${icon}" class="w-3.5 h-3.5"></i>
+            <span class="text-[10px] font-bold uppercase tracking-wider">${k}</span></div>
+          <div class="text-[17px] font-bold mt-1.5">${v}</div></div>`).join('')}
+    </div>
+    <div class="mt-4 rounded-xl border border-green-200 bg-green-50 p-4 flex items-start gap-3">
+      <i data-lucide="check-circle" class="w-5 h-5 text-green-600 shrink-0 mt-0.5"></i>
+      <div class="flex-1"><div class="text-[13px] font-bold text-green-800">Extraction successful</div>
+        <div class="text-[12px] text-green-700 mt-0.5">Every required field came back above the confidence gate. This agent is ready to publish.</div></div>
+      <button class="btn-secondary shrink-0" data-action="nav" data-route="/playground"><i data-lucide="external-link" class="w-3.5 h-3.5"></i>Full playground</button>
+    </div>
+    <button class="btn-secondary mt-3" data-builder-test><i data-lucide="rotate-cw" class="w-4 h-4"></i>Run again</button>` : ''}`;
+}
+
 SCREENS['/builder'] = () => {
-  const steps = BUILDER_STEPS[STATE.builderOp] || BUILDER_STEPS.extraction;
-  const idx = Math.min(STATE.builderStep, steps.length - 1);
-  const cur = steps[idx];
-  const isLast = idx === steps.length - 1;
+  const idx = Math.min(STATE.builderStage, BUILD_STAGES.length - 1);
+  const stage = BUILD_STAGES[idx];
+  const typeId = STATE.builderType;
+  const type = typeId ? AGENT_TYPE[typeId] : null;
 
   const bodies = {
-    setup: `
-      <div class="space-y-5">
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div><label class="block text-[12px] font-semibold mb-1.5">Agent Name <span class="text-[#f05742]">*</span></label>
-            <input class="input-field" value="teck_sang_invoice_extraction" />
-            <p class="text-[11px] text-gray-400 mt-1">Lowercase, underscores only. Becomes the agent_id in the compiled config.</p></div>
-          <div><label class="block text-[12px] font-semibold mb-1.5">Industry <span class="text-[#f05742]">*</span></label>
-            <select class="input-field">${['Retail','Finance','Healthcare','Legal','Logistics','Insurance','Government','Other'].map(i => `<option ${i === 'Retail' ? 'selected' : ''}>${i}</option>`).join('')}</select></div>
-        </div>
-        <div><label class="block text-[12px] font-semibold mb-1.5">Description <span class="text-[#f05742]">*</span></label>
-          <textarea class="input-field" rows="2">Extract header, tax and line-item detail from supplier invoices for AP posting.</textarea></div>
-        <div>
-          <label class="block text-[12px] font-semibold mb-2.5">Operation Type <span class="text-[#f05742]">*</span></label>
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            ${OPERATION_TYPES.map(op => `<button data-builder-op="${op.id}" class="text-left p-4 rounded-xl border-2 transition ${STATE.builderOp === op.id ? 'border-[#f05742] bg-[#f05742]/[.05]' : 'border-gray-200 hover:border-gray-300'}">
-              <div class="flex items-start gap-3">
-                <div class="w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${STATE.builderOp === op.id ? 'bg-[#f05742] text-white' : 'bg-gray-100 text-gray-500'}">
-                  <i data-lucide="${op.icon}" class="w-4 h-4"></i></div>
-                <div><div class="text-[13px] font-bold">${op.title}</div>
-                  <div class="text-[11.5px] text-gray-500 mt-0.5 leading-snug">${op.blurb}</div></div>
-              </div></button>`).join('')}
-          </div>
-        </div>
-      </div>`,
-
-    input: `
-      <div class="space-y-5">
-        <div>
-          <label class="block text-[12px] font-semibold mb-2.5">Accepted file formats</label>
-          <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2.5">
-            ${[['PDF',true],['JPG',true],['JPEG',true],['PNG',true],['TIFF',true],['DOCX',false],['XLSX',false],['TXT',false]].map(([f, on]) => `
-              <label class="flex items-center gap-2.5 p-3 rounded-xl border cursor-pointer transition ${on ? 'border-[#f05742]/40 bg-[#f05742]/[.05]' : 'border-gray-200 hover:border-gray-300'}">
-                <span class="w-4 h-4 rounded flex items-center justify-center shrink-0 ${on ? 'bg-[#f05742]' : 'border-2 border-gray-300'}">
-                  ${on ? '<i data-lucide="check" class="w-3 h-3 text-white"></i>' : ''}</span>
-                <span class="text-[12.5px] font-semibold">${f}</span></label>`).join('')}
-          </div>
-        </div>
-        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          <div><label class="block text-[12px] font-semibold mb-1.5">Max files per run</label><input class="input-field" value="3" /></div>
-          <div><label class="block text-[12px] font-semibold mb-1.5">Max file size</label><input class="input-field" value="15 MB" /></div>
-          <div><label class="block text-[12px] font-semibold mb-1.5">Processing mode</label>
-            <select class="input-field"><option>files_only</option><option>hybrid</option><option>chunks_only</option></select></div>
-        </div>
-        <div class="p-3.5 rounded-xl bg-blue-50 border border-blue-100 flex gap-2.5">
-          <i data-lucide="info" class="w-4 h-4 text-blue-500 shrink-0 mt-0.5"></i>
-          <div class="text-[12px] text-blue-800 leading-relaxed">These settings compile into the <span class="font-mono font-semibold">validate_files</span> step. Files that breach them fail fast with <span class="font-mono">FILE_TOO_LARGE</span> or <span class="font-mono">INVALID_FILE_TYPE</span> before any paid OCR or LLM call is made.</div>
-        </div>
-      </div>`,
-
-    classify: `
-      <div class="space-y-5">
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div><label class="block text-[12px] font-semibold mb-1.5">Document category</label>
-            <select class="input-field"><option>Financial — Invoice</option><option>Financial — Purchase Order</option><option>Financial — Delivery Order</option><option>Identity Document</option></select></div>
-          <div><label class="block text-[12px] font-semibold mb-1.5">Sub-type</label>
-            <select class="input-field"><option>Supplier Tax Invoice</option><option>Proforma Invoice</option><option>Credit Note</option></select></div>
-        </div>
-        <div>
-          <label class="block text-[12px] font-semibold mb-1.5">Scope boundaries</label>
-          <p class="text-[11.5px] text-gray-500 mb-2">Define what this agent <b>should</b> and <b>should not</b> process. The classifier uses this verbatim.</p>
-          <textarea class="input-field font-mono text-[12px]" rows="5">ACCEPT: supplier tax invoices, proforma invoices and credit notes issued to Teck Sang Trading, in SGD/USD/MYR, with a visible invoice number and total.
-
-REJECT: delivery orders, purchase orders, statements of account, quotations, and any document without a stated total amount. Reject handwritten-only invoices.</textarea>
-        </div>
-        <div class="flex items-center gap-3 p-3.5 rounded-xl border border-gray-200">
-          <span class="w-9 h-5 rounded-full bg-[#f05742] relative shrink-0"><span class="absolute right-0.5 top-0.5 w-4 h-4 rounded-full bg-white"></span></span>
-          <div><div class="text-[12.5px] font-semibold">Reject out-of-scope documents automatically</div>
-            <div class="text-[11.5px] text-gray-500">Terminates the run with a clear reason instead of extracting garbage.</div></div>
-        </div>
-      </div>`,
-
-    schema: `
-      <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
-        <div><div class="text-[13px] font-bold">${SCHEMA_FIELDS.length} extraction fields</div>
-          <div class="text-[11.5px] text-gray-500">Drag to reorder. Order affects prompt construction.</div></div>
-        <div class="flex gap-2">
-          <button class="btn-secondary" data-builder-autoschema><i data-lucide="sparkles" class="w-4 h-4"></i>Auto-generate from sample</button>
-          <button class="btn-primary" data-action="toast" data-msg="New field row added"><i data-lucide="plus" class="w-4 h-4"></i>Add field</button>
-        </div>
-      </div>
-      <div class="space-y-2">
-        ${SCHEMA_FIELDS.map(f => `
-          <div class="flex items-start gap-3 p-3.5 rounded-xl border border-gray-200 bg-white hover:border-[#f05742]/30 transition group">
-            <i data-lucide="grip-vertical" class="w-4 h-4 text-gray-300 mt-1.5 cursor-grab shrink-0"></i>
-            <div class="flex-1 min-w-0 grid grid-cols-1 md:grid-cols-12 gap-3 items-start">
-              <div class="md:col-span-4">
-                <div class="text-[13px] font-semibold flex items-center gap-1.5">${esc(f.label)}
-                  ${f.req ? '<span class="text-[#f05742] text-[15px] leading-none">*</span>' : ''}</div>
-                <div class="text-[10.5px] text-gray-400 font-mono">${esc(f.name)}</div>
+    type: `
+      <p class="text-[12.5px] text-gray-500 mb-4">The type decides which configuration form you get next, and which workbench the finished agent opens into. Pick Custom when none of the three fit.</p>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+        ${AGENT_TYPES.map(t => {
+          const on = typeId === t.id;
+          return `<button data-builder-type="${t.id}" class="text-left p-5 rounded-2xl border-2 transition ${on ? 'shadow-md' : 'border-gray-200 hover:border-gray-300'}"
+            style="${on ? 'border-color:' + t.color + ';background:' + t.color + '0d' : ''}">
+            <div class="flex items-start gap-3">
+              <div class="w-10 h-10 rounded-xl flex items-center justify-center shrink-0"
+                   style="background:${on ? t.color : '#f3f4f6'};color:${on ? '#fff' : '#9ca3af'}">
+                <i data-lucide="${t.icon}" class="w-5 h-5"></i></div>
+              <div class="min-w-0 flex-1">
+                <div class="text-[14.5px] font-bold flex items-center gap-2">${t.title}
+                  ${on ? '<i data-lucide="check-circle" class="w-4 h-4" style="color:' + t.color + '"></i>' : ''}</div>
+                <p class="text-[12px] text-gray-600 mt-1.5 leading-relaxed">${t.blurb}</p>
+                <p class="text-[11.5px] text-gray-400 mt-2 italic">${t.example}</p>
+                <div class="mt-3 pt-2.5 border-t border-gray-100 flex items-center gap-1.5 text-[11px] text-gray-400">
+                  <i data-lucide="layout-dashboard" class="w-3 h-3"></i>Opens into: <b class="text-gray-500">${t.workbench}</b></div>
               </div>
-              <div class="md:col-span-2">${pill(f.type, f.type === 'currency' ? 'green' : f.type === 'date' ? 'blue' : f.type === 'array' ? 'purple' : 'gray')}</div>
-              <div class="md:col-span-6 text-[11.5px] text-gray-500 leading-snug">${esc(f.desc)}</div>
-            </div>
-            <button class="p-1.5 rounded-lg opacity-0 group-hover:opacity-100 hover:bg-red-50 text-gray-400 hover:text-red-500 transition shrink-0"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
-          </div>`).join('')}
-      </div>`,
+            </div></button>`;
+        }).join('')}
+      </div>
+      ${typeId ? `<div class="mt-4 p-3.5 rounded-xl bg-blue-50 border border-blue-100 flex gap-2.5">
+        <i data-lucide="info" class="w-4 h-4 text-blue-500 shrink-0 mt-0.5"></i>
+        <div class="text-[12px] text-blue-800 leading-relaxed">You can change the type later, but the configuration does not carry across — the forms ask for genuinely different things.</div></div>` : ''}`,
 
-    validation: `
-      <div class="space-y-3">
-        ${VALIDATION_RULES.map(r => `
-          <div class="flex items-start gap-3 p-3.5 rounded-xl border ${r.builtin ? 'border-gray-200 bg-gray-50/60' : 'border-[#f05742]/25 bg-[#f05742]/[.03]'}">
-            <span class="w-9 h-5 rounded-full bg-[#f05742] relative shrink-0 mt-0.5"><span class="absolute right-0.5 top-0.5 w-4 h-4 rounded-full bg-white"></span></span>
-            <div class="flex-1 min-w-0">
-              <div class="text-[12.5px] font-semibold flex items-center gap-2">${esc(r.name)}
-                ${r.builtin ? pill('Built-in','gray') : pill('Custom','brand')}</div>
-              <div class="text-[11.5px] text-gray-500 mt-0.5">${esc(r.desc)}</div>
-            </div>
-          </div>`).join('')}
-      </div>
-      <button class="btn-secondary mt-4" data-action="toast" data-msg="Describe the rule in plain English — it compiles to a validation step"><i data-lucide="plus" class="w-4 h-4"></i>Add custom rule</button>
-      <div class="mt-5 p-4 rounded-xl bg-amber-50 border border-amber-200">
-        <div class="flex items-center gap-2 text-amber-800 font-semibold text-[12.5px] mb-1.5"><i data-lucide="user-check" class="w-4 h-4"></i>Human review trigger</div>
-        <div class="text-[12px] text-amber-800 leading-relaxed">When any rule marked <b>route to review</b> fails, or mean confidence falls below <b>0.85</b>, the run pauses at a <span class="font-mono">human_review</span> step with a 24-hour SLA instead of posting. Reviewers see the source document beside the extracted fields.</div>
-      </div>`,
+    configure: typeId ? configureBody(typeId) : '',
+    test: '<div id="builder-test-panel">' + builderTestPanel() + '</div>',
 
-    output: `
-      <div class="space-y-3">
-        ${[['Store in DocsAI','database',true,'Structured JSON retained for 180 days with full lineage.'],
-           ['Send to external API','webhook',true,'POST https://erp.internal/api/ap/invoices'],
-           ['Send email notification','mail',false,'ap-team@tecksang.com.sg'],
-           ['Post to webhook','link',false,'Fires on completion and on failure.']].map(([label, icon, on, sub]) => `
-          <div class="flex items-start gap-3 p-4 rounded-xl border ${on ? 'border-[#f05742]/30 bg-[#f05742]/[.04]' : 'border-gray-200'}">
-            <div class="w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${on ? 'bg-[#f05742] text-white' : 'bg-gray-100 text-gray-400'}">
-              <i data-lucide="${icon}" class="w-4 h-4"></i></div>
-            <div class="flex-1 min-w-0"><div class="text-[13px] font-semibold">${label}</div>
-              <div class="text-[11.5px] text-gray-500 font-mono mt-0.5">${sub}</div></div>
-            <span class="w-9 h-5 rounded-full relative shrink-0 mt-1 ${on ? 'bg-[#f05742]' : 'bg-gray-200'}">
-              <span class="absolute ${on ? 'right-0.5' : 'left-0.5'} top-0.5 w-4 h-4 rounded-full bg-white"></span></span>
-          </div>`).join('')}
+    publish: `
+      <div class="rounded-xl border ${STATE.builderTestState === 'done' ? 'border-green-200 bg-green-50' : 'border-amber-200 bg-amber-50'} p-4 flex items-start gap-3 mb-5">
+        <i data-lucide="${STATE.builderTestState === 'done' ? 'check-circle' : 'alert-triangle'}" class="w-5 h-5 shrink-0 mt-0.5 ${STATE.builderTestState === 'done' ? 'text-green-600' : 'text-amber-600'}"></i>
+        <div><div class="text-[13px] font-bold ${STATE.builderTestState === 'done' ? 'text-green-800' : 'text-amber-800'}">
+          ${STATE.builderTestState === 'done' ? 'Tested and ready' : 'Not tested yet'}</div>
+          <div class="text-[12px] ${STATE.builderTestState === 'done' ? 'text-green-700' : 'text-amber-800'} mt-0.5">
+            ${STATE.builderTestState === 'done'
+              ? 'The test run passed every check. Publishing makes this version live for connectors, the API and Upload &amp; Execute.'
+              : 'You can publish without testing, but nothing has proven this configuration works on a real document yet.'}</div></div>
       </div>
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-5">
-        <div><label class="block text-[12px] font-semibold mb-1.5">Output format</label>
-          <select class="input-field"><option>JSON (camelCase)</option><option>JSON (snake_case)</option><option>CSV</option></select></div>
-        <div><label class="block text-[12px] font-semibold mb-1.5">File naming</label>
-          <input class="input-field font-mono text-[12px]" value="invoice_{run_id}_{timestamp}.json" /></div>
-      </div>`,
 
-    review: STATE.builderView === 'yaml' ? `
-      <div class="flex items-center justify-between mb-3">
-        <div class="text-[13px] font-bold">Compiled agent configuration</div>
-        <button class="btn-ghost !py-1" data-action="toast" data-msg="YAML copied"><i data-lucide="copy" class="w-3.5 h-3.5"></i>Copy YAML</button>
-      </div>
-      <pre class="bg-[#1e1e2e] rounded-xl p-4 text-[11.5px] font-mono overflow-x-auto max-h-[520px] leading-relaxed text-gray-300">${yamlHi(AGENT_YAML)}</pre>`
-      : STATE.builderView === 'flow' ? `
-      <div class="text-[13px] font-bold mb-1">Compiled execution graph</div>
-      <p class="text-[12px] text-gray-500 mb-4">Nine steps, one condition branch, one human-review gate and one fallback path. Parallel processing is on with a ceiling of four concurrent tasks.</p>
-      <div class="rounded-xl border border-gray-200 bg-gray-50/60 p-4 overflow-x-auto">${flowSvg()}</div>
-      <div class="flex items-center gap-4 flex-wrap mt-4 text-[11.5px] text-gray-500">
-        <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded bg-[#fff0ed] border border-[#f05742]"></span>Processing step</span>
-        <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded bg-[#faf5ff] border border-purple-500"></span>Condition</span>
-        <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded bg-[#fffbeb] border border-amber-500"></span>Human review gate</span>
-        <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded bg-[#ecfdf5] border border-emerald-500"></span>Output</span>
-        <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded bg-gray-50 border border-dashed border-gray-400"></span>Fallback path</span>
-      </div>` : `
-      <div class="rounded-xl border border-green-200 bg-green-50 p-4 flex items-center gap-3 mb-5">
-        <i data-lucide="check-circle" class="w-5 h-5 text-green-600 shrink-0"></i>
-        <div><div class="text-[13px] font-bold text-green-800">Configuration complete</div>
-          <div class="text-[12px] text-green-700">All 7 validators passed. 9 steps compiled, 0 errors, 0 warnings.</div></div>
-      </div>
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-        ${[['Agent Name','teck_sang_invoice_extraction'],['Operation Type','Data Extraction'],
-           ['Industry','Retail'],['Input Formats','PDF, JPG, JPEG, PNG, TIFF'],
-           ['Extraction Fields','9 fields (7 required)'],['Validation Rules','6 rules (3 custom)'],
-           ['OCR Engine','Azure Document Intelligence'],['Extraction Model','gpt-4o-mini'],
-           ['Human Review','Enabled · 24h SLA · below 0.85 confidence'],['Output','DocsAI store + ERP POST'],
-           ['Pipeline Steps','9 steps · 1 branch · 1 fallback'],['Est. cost per run','4.2 credits ≈ $0.042']]
+        ${[['Agent name', BUILDER_DEFAULT_NAME[typeId] || 'new_agent'],
+           ['Agent type', type ? type.title : '—'],
+           ['Workbench', type ? type.workbench : '—'],
+           ['Pipeline', typeId === 'reconciliation' ? '14 steps · 1 branch · HITL gate'
+                      : typeId === 'claims' ? '12 steps · 2 branches · HITL gate'
+                      : typeId === 'invoice-validator' ? '11 steps · 1 branch · HITL gate'
+                      : '11 steps · 1 branch · HITL gate'],
+           ['Trigger', 'Manual — bind a connector after publishing'],
+           ['Est. cost per run', (typeId === 'reconciliation' ? '7.5' : typeId === 'claims' ? '8.2' : '4.2') + ' credits'],
+           ['Version', 'v1 — first version'],
+           ['Visible to', 'Admin, Manager (2 members)']]
           .map(([k, v]) => `<div class="p-3.5 rounded-xl bg-gray-50 border border-gray-100">
             <div class="text-[10px] font-bold uppercase tracking-wider text-gray-400">${k}</div>
-            <div class="text-[12.5px] font-semibold mt-1">${v}</div></div>`).join('')}
+            <div class="text-[12.5px] font-semibold mt-1">${esc(v)}</div></div>`).join('')}
+      </div>
+
+      <div class="mt-5 rounded-xl border border-gray-200 p-4">
+        <div class="text-[12.5px] font-bold mb-2.5">What happens on publish</div>
+        <div class="space-y-2">
+          ${['The configuration is frozen as version 1 and cannot be edited in place — the next change starts a draft.',
+             'The agent appears in Upload &amp; Execute and can be bound to a connector.',
+             'The previous version, if any, stays available for one-click rollback.',
+             'An AGENT_PUBLISH entry is written to the audit log against your account.']
+            .map(t => `<div class="flex items-start gap-2.5 text-[12px] text-gray-600">
+              <i data-lucide="check" class="w-3.5 h-3.5 text-green-500 shrink-0 mt-0.5"></i><span>${t}</span></div>`).join('')}
+        </div>
       </div>`,
   };
 
-  const body = bodies[cur.key] || `<div class="py-12 text-center text-gray-400 text-[13px]">Configuration for “${esc(cur.title)}”.</div>`;
+  const canContinue = idx !== 0 || !!typeId;
+  const isLast = idx === BUILD_STAGES.length - 1;
 
   return `<div class="h-full flex flex-col bg-gray-50/50">
     <div class="flex-1 overflow-y-auto">
@@ -2488,24 +3354,25 @@ REJECT: delivery orders, purchase orders, statements of account, quotations, and
         <div class="flex items-center gap-1.5 text-[12px] text-gray-400 mb-4">
           <button class="hover:text-[#f05742] font-medium flex items-center gap-1.5" data-action="nav" data-route="/agents">
             <i data-lucide="workflow" class="w-3.5 h-3.5"></i>Agents</button>
-          <i data-lucide="chevron-right" class="w-3 h-3"></i><span class="text-gray-600 font-medium">Agent Builder</span>
+          <i data-lucide="chevron-right" class="w-3 h-3"></i><span class="text-gray-600 font-medium">Creating an Agent</span>
+          ${type ? `<i data-lucide="chevron-right" class="w-3 h-3"></i><span>${esc(type.title)}</span>` : ''}
         </div>
-        <div class="flex items-center gap-3 mb-5">
+        <div class="flex items-center gap-3 mb-5 flex-wrap">
           <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-[#f05742] to-[#ff6b58] flex items-center justify-center shrink-0">
             <i data-lucide="wand-2" class="w-5 h-5 text-white"></i></div>
-          <div><h1 class="text-[22px] font-bold leading-tight">Create New Agent</h1>
-            <div class="text-[12px] text-gray-500">Configure once — the platform compiles it into a runnable pipeline.</div></div>
+          <div class="flex-1 min-w-0"><h1 class="text-[22px] font-bold leading-tight">Creating an Agent</h1>
+            <div class="text-[12px] text-gray-500">Pick a type, configure it, test it, publish it.</div></div>
+          ${type ? typeChip(type.id) : ''}
         </div>
 
-        ${stepIndicator(steps, idx)}
+        ${stepIndicator(BUILD_STAGES, idx)}
 
         <div class="bg-white rounded-2xl border border-gray-100 shadow-sm p-6 sm:p-8">
-          ${isLast ? `<div class="flex items-center gap-1 mb-5 border-b border-gray-100 -mt-2">
-            ${[['form','Summary','list-checks'],['yaml','YAML Config','file-code'],['flow','Execution Graph','git-branch']].map(([k, label, icon]) => `
-              <button data-builder-view="${k}" class="px-3.5 py-2.5 text-[12.5px] font-semibold border-b-2 flex items-center gap-1.5 transition ${STATE.builderView === k ? 'border-[#f05742] text-[#f05742]' : 'border-transparent text-gray-500 hover:text-gray-700'}">
-                <i data-lucide="${icon}" class="w-3.5 h-3.5"></i>${label}</button>`).join('')}
-          </div>` : ''}
-          ${body}
+          <div class="mb-5 pb-4 border-b border-gray-100">
+            <h2 class="text-[16px] font-bold">${esc(stage.title)}${idx === 1 && type ? ' <span class="text-gray-400 font-medium">(specific to ' + esc(type.title) + ')</span>' : ''}</h2>
+            <p class="text-[12.5px] text-gray-500 mt-0.5">${esc(stage.sub)}</p>
+          </div>
+          ${bodies[stage.key] || ''}
         </div>
       </div>
     </div>
@@ -2514,10 +3381,11 @@ REJECT: delivery orders, purchase orders, statements of account, quotations, and
       <div class="max-w-5xl mx-auto flex items-center gap-2 flex-wrap">
         <button class="btn-ghost" ${idx === 0 ? 'disabled' : ''} data-builder-nav="prev"><i data-lucide="chevron-left" class="w-4 h-4"></i>Back</button>
         <div class="flex-1"></div>
-        <button class="btn-secondary" data-action="toast" data-msg="Progress saved as a draft configuration"><i data-lucide="save" class="w-4 h-4"></i>Save Progress</button>
-        ${isLast ? `<button class="btn-secondary !border-[#f05742]/40 !text-[#f05742] !bg-[#f05742]/[.06]" data-action="nav" data-route="/playground"><i data-lucide="play" class="w-4 h-4"></i>Test in Playground</button>
-          <button class="btn-primary" data-builder-publish><i data-lucide="rocket" class="w-4 h-4"></i>Publish Agent</button>`
-        : `<button class="btn-primary" data-builder-nav="next">Continue<i data-lucide="chevron-right" class="w-4 h-4"></i></button>`}
+        <button class="btn-secondary" data-action="toast" data-msg="Progress saved as a draft configuration"><i data-lucide="save" class="w-4 h-4"></i>Save draft</button>
+        ${isLast
+          ? `<button class="btn-primary" data-builder-publish><i data-lucide="rocket" class="w-4 h-4"></i>Publish the version</button>`
+          : `<button class="btn-primary" data-builder-nav="next" ${canContinue ? '' : 'disabled'}>
+               ${idx === 0 && !typeId ? 'Choose a type to continue' : 'Continue'}<i data-lucide="chevron-right" class="w-4 h-4"></i></button>`}
       </div>
     </div>
   </div>`;
@@ -2525,35 +3393,86 @@ REJECT: delivery orders, purchase orders, statements of account, quotations, and
 
 AFTER['/builder'] = () => {
   $('#screen').addEventListener('click', (e) => {
-    const steps = BUILDER_STEPS[STATE.builderOp] || BUILDER_STEPS.extraction;
     const nav = e.target.closest('[data-builder-nav]');
     if (nav && !nav.disabled) {
-      STATE.builderStep = nav.getAttribute('data-builder-nav') === 'next'
-        ? Math.min(STATE.builderStep + 1, steps.length - 1) : Math.max(STATE.builderStep - 1, 0);
+      STATE.builderStage = nav.getAttribute('data-builder-nav') === 'next'
+        ? Math.min(STATE.builderStage + 1, BUILD_STAGES.length - 1)
+        : Math.max(STATE.builderStage - 1, 0);
       router(); return;
     }
     const jump = e.target.closest('[data-builder-step]');
-    if (jump) { STATE.builderStep = +jump.getAttribute('data-builder-step'); router(); return; }
-    const op = e.target.closest('[data-builder-op]');
-    if (op) { STATE.builderOp = op.getAttribute('data-builder-op'); STATE.builderStep = 0; router(); return; }
-    const view = e.target.closest('[data-builder-view]');
-    if (view) { STATE.builderView = view.getAttribute('data-builder-view'); router(); return; }
+    if (jump) {
+      const target = +jump.getAttribute('data-builder-step');
+      if (target > 0 && !STATE.builderType) { toast('Choose an agent type first', 'info'); return; }
+      STATE.builderStage = target; router(); return;
+    }
+    const ty = e.target.closest('[data-builder-type]');
+    if (ty) {
+      const next = ty.getAttribute('data-builder-type');
+      if (next !== STATE.builderType) {
+        STATE.builderType = next;
+        STATE.builderGenerated = false;
+        STATE.builderTestState = null;
+      }
+      router(); return;
+    }
+    const rc = e.target.closest('[data-builder-recipe]');
+    if (rc) { STATE.builderRecipe = rc.getAttribute('data-builder-recipe'); router(); return; }
+    const pv = e.target.closest('[data-builder-preview]');
+    if (pv) { STATE.builderPreview = pv.getAttribute('data-builder-preview'); router(); return; }
+
+    if (e.target.closest('[data-builder-generate]')) {
+      const btn = e.target.closest('[data-builder-generate]');
+      btn.disabled = true;
+      btn.innerHTML = '<i data-lucide="loader" class="w-4 h-4 spin"></i>Reading your requirement…';
+      lucide.createIcons({ nodes: [btn] });
+      setTimeout(() => {
+        STATE.builderGenerated = true;
+        STATE.builderPreview = 'summary';
+        router();
+        toast('Configuration drafted — 11 steps, 0 validation errors', 'brand');
+      }, 900);
+      return;
+    }
+
+    if (e.target.closest('[data-builder-test]')) {
+      STATE.builderTestState = 'running';
+      STATE.builderTestPct = 0;
+      router();
+      const timer = trackTimer(setInterval(() => {
+        STATE.builderTestPct = Math.min(100, STATE.builderTestPct + between(12, 24));
+        if (STATE.builderTestPct >= 100) {
+          clearInterval(timer);
+          STATE.builderTestState = 'done';
+          router();
+          toast('Test run passed — 9 of 9 fields captured', 'success');
+          return;
+        }
+        const panel = $('#builder-test-panel');
+        if (panel) { panel.innerHTML = builderTestPanel(); lucide.createIcons({ nodes: [panel] }); }
+      }, 520));
+      return;
+    }
+
     if (e.target.closest('[data-builder-publish]')) {
+      const t = STATE.builderType ? AGENT_TYPE[STATE.builderType] : AGENT_TYPE.custom;
       openModal(`<div class="bg-white rounded-2xl p-6 text-center">
         <div class="w-14 h-14 rounded-full bg-green-50 flex items-center justify-center mx-auto mb-4"><i data-lucide="rocket" class="w-6 h-6 text-green-600"></i></div>
-        <h3 class="font-bold text-[17px]">Publish this agent?</h3>
-        <p class="text-[13px] text-gray-500 mt-2 leading-relaxed">Publishing creates <b>version 4</b> of <span class="font-mono text-[12px]">teck_sang_invoice_extraction</span> and makes it available to connectors, the API and Upload &amp; Execute. Version 3 stays available for rollback.</p>
+        <h3 class="font-bold text-[17px]">Publish version 1?</h3>
+        <p class="text-[13px] text-gray-500 mt-2 leading-relaxed"><span class="font-mono text-[12px]">${esc(BUILDER_DEFAULT_NAME[STATE.builderType] || 'new_agent')}</span> will go live as a <b>${esc(t.title)}</b> agent. It becomes available to connectors, the API and Upload &amp; Execute immediately.</p>
+        ${STATE.builderTestState === 'done' ? '' : `<div class="mt-4 p-3 rounded-xl bg-amber-50 border border-amber-200 text-[12px] text-amber-900 text-left">This agent has not been tested. Publishing anyway is allowed, but the first live document will be the first real test.</div>`}
         <div class="flex justify-center gap-2 mt-6">
           <button class="btn-secondary" data-action="close-modal">Cancel</button>
-          <button class="btn-primary" data-action="close-modal" onclick="toast('Agent published as v4','brand')"><i data-lucide="rocket" class="w-4 h-4"></i>Publish</button>
+          <button class="btn-primary" data-action="close-modal" onclick="toast('Agent published as v1','brand')"><i data-lucide="rocket" class="w-4 h-4"></i>Publish</button>
         </div></div>`);
       return;
     }
+
     if (e.target.closest('[data-builder-autoschema]')) {
       openModal(`<div class="bg-white rounded-2xl overflow-hidden">
         <div class="px-6 py-4 border-b border-gray-100 flex items-center gap-3">
           <div class="w-9 h-9 rounded-lg bg-gradient-to-br from-[#f05742] to-[#ff6b58] flex items-center justify-center shrink-0"><i data-lucide="sparkles" class="w-4 h-4 text-white"></i></div>
-          <div class="flex-1"><h3 class="font-bold text-[15px]">Auto-generate schema</h3>
+          <div class="flex-1"><h3 class="font-bold text-[15px]">Auto-generate fields</h3>
             <div class="text-[11.5px] text-gray-400">A vision model reads a sample document and proposes the field set</div></div>
           <button class="p-2 rounded-lg hover:bg-gray-100" data-action="close-modal"><i data-lucide="x" class="w-4 h-4 text-gray-500"></i></button>
         </div>
@@ -2575,7 +3494,7 @@ AFTER['/builder'] = () => {
         </div>
         <div class="px-6 py-4 border-t border-gray-100 flex justify-end gap-2 bg-gray-50/60">
           <button class="btn-secondary" data-action="close-modal">Discard</button>
-          <button class="btn-primary" data-action="close-modal" onclick="toast('9 fields added to the schema','success')">Accept all fields</button>
+          <button class="btn-primary" data-action="close-modal" onclick="toast('9 fields added','success')">Accept all fields</button>
         </div></div>`, { width:'max-w-lg w-full' });
     }
   });
@@ -2592,7 +3511,32 @@ SCREENS['/templates'] = () => {
     ${pageHeader('layout-template','Use Case Templates','Start from a proven configuration instead of a blank canvas. Every template is data, not code — new ones ship without a release.',
       `<button class="btn-secondary" data-action="toast" data-msg="Template catalog is data-driven — add a new entry without redeploying"><i data-lucide="plus" class="w-4 h-4"></i>New Template</button>`)}
 
-    <div class="flex items-center gap-2 flex-wrap mb-5">
+    <div class="mb-2 flex items-baseline gap-3 flex-wrap">
+      <h2 class="text-[15px] font-bold">Start here</h2>
+      <p class="text-[12px] text-gray-500">The four agent types. Picking one here drops you straight into its Configure form.</p>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-8">
+      ${AGENT_TYPES.map(t => {
+        const built = AGENTS.filter(a => a.type === t.id).length;
+        return `<button data-template-type="${t.id}" class="text-left bg-white rounded-2xl border-2 p-5 hover-lift transition flex flex-col"
+          style="border-color:${t.color}33">
+          <div class="w-11 h-11 rounded-xl flex items-center justify-center mb-3.5" style="background:${t.color}18">
+            <i data-lucide="${t.icon}" class="w-5 h-5" style="color:${t.color}"></i></div>
+          <div class="text-[15px] font-bold leading-tight">${t.title}</div>
+          <p class="text-[12px] text-gray-500 leading-relaxed mt-2 flex-1">${t.blurb}</p>
+          <div class="flex items-center justify-between mt-4 pt-3 border-t border-gray-50">
+            <span class="text-[11px] text-gray-400">${built} built</span>
+            <span class="text-[12px] font-semibold flex items-center gap-1" style="color:${t.color}">Create <i data-lucide="arrow-right" class="w-3.5 h-3.5"></i></span>
+          </div>
+        </button>`;
+      }).join('')}
+    </div>
+
+    <div class="mb-3 flex items-baseline gap-3 flex-wrap">
+      <h2 class="text-[15px] font-bold">More templates</h2>
+      <p class="text-[12px] text-gray-500">Pre-filled configurations for common document work. Each one is data, not code — new ones ship without a release.</p>
+    </div>
+    <div class="flex items-center gap-2 flex-wrap mb-4">
       ${cats.map((c, i) => `<button class="px-3.5 py-1.5 rounded-full text-[12.5px] font-semibold border transition ${i === 0 ? 'bg-[#f05742] text-white border-[#f05742]' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'}">${c}</button>`).join('')}
     </div>
 
@@ -2636,7 +3580,7 @@ function templateDetail(id) {
           <p class="text-[13px] text-gray-500 mt-1.5 max-w-2xl leading-relaxed">${esc(t.blurb)}</p>
         </div>
       </div>
-      <button class="btn-primary" data-action="nav" data-route="/builder"><i data-lucide="wand-2" class="w-4 h-4"></i>Use this template</button>
+      <button class="btn-primary" data-template-type="${TEMPLATE_TO_TYPE[t.id] || 'custom'}"><i data-lucide="wand-2" class="w-4 h-4"></i>Use this template</button>
     </div>
 
     <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
@@ -2731,6 +3675,16 @@ AFTER['/templates'] = () => {
     const open = e.target.closest('[data-template-open]');
     if (open) { STATE.templateOpen = open.getAttribute('data-template-open'); router(); return; }
     if (e.target.closest('[data-template-back]')) { STATE.templateOpen = null; router(); return; }
+    const ty = e.target.closest('[data-template-type]');
+    if (ty) {
+      STATE.builderType = ty.getAttribute('data-template-type');
+      STATE.builderStage = 1;              // land straight on Configure
+      STATE.builderGenerated = false;
+      STATE.builderTestState = null;
+      STATE.templateOpen = null;
+      location.hash = '#/builder';
+      return;
+    }
     const r = e.target.closest('[data-recipe]');
     if (r) { STATE.recipeOpen = r.getAttribute('data-recipe'); router(); }
   });
@@ -3573,178 +4527,8 @@ const RECON_STATUS = {
   unmatched:  { label:'Unmatched',  cls:'bg-red-50 text-red-700 border-red-200', icon:'x-circle' },
 };
 
-SCREENS['/reconciliation'] = () => {
-  const recipe = RECIPES.find(r => r.id === STATE.reconRecipe) || RECIPES[0];
-  const counts = RECON_ROWS.reduce((acc, r) => { acc[r.status] = (acc[r.status] || 0) + 1; return acc; }, {});
-  const totalA = RECON_ROWS.filter(r => r.amtA != null).reduce((s, r) => s + r.amtA, 0);
-  const totalB = RECON_ROWS.filter(r => r.amtB != null).reduce((s, r) => s + r.amtB, 0);
-  const variance = +(totalA - totalB).toFixed(2);
-  const autoPct = Math.round((counts.matched || 0) / RECON_ROWS.length * 100);
-
-  if (!STATE.reconRun) {
-    return page(`
-      ${pageHeader('arrow-left-right','Reconciliation','Match records across any two documents and highlight what does not reconcile. The recipe is data, so a new industry is a config change, not a release.')}
-
-      <div class="bg-white rounded-2xl border border-gray-100 shadow-sm p-5 mb-5">
-        <div class="text-[13px] font-bold mb-1">1 · Choose a recipe</div>
-        <p class="text-[12px] text-gray-500 mb-3.5">A recipe declares the document pair, the field mapping and the matching tolerances.</p>
-        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-          ${RECIPES.map(r => `<button data-recon-recipe="${r.id}" class="text-left p-4 rounded-xl border-2 transition ${STATE.reconRecipe === r.id ? 'border-[#f05742] bg-[#f05742]/[.05]' : 'border-gray-200 hover:border-gray-300'}">
-            <div class="flex items-center gap-2 mb-1.5">${pill(esc(r.industry), 'gray')}<span class="text-[11px] text-gray-400">${esc(r.sub)}</span></div>
-            <div class="text-[12.5px] font-bold leading-snug">${esc(r.a.label)} <span class="text-gray-300">↔</span> ${esc(r.b.label)}</div>
-            <div class="text-[11px] text-gray-500 mt-1.5">${r.map.length} mapped fields · ± ${r.tolDays} day window</div>
-          </button>`).join('')}
-        </div>
-      </div>
-
-      <div class="bg-white rounded-2xl border border-gray-100 shadow-sm p-5 mb-5">
-        <div class="text-[13px] font-bold mb-1">2 · Attach the document pair</div>
-        <p class="text-[12px] text-gray-500 mb-3.5">Each side is parsed by the same extraction engine used everywhere else — any format, any bank, no per-source parser.</p>
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-          ${[[recipe.a, 'A', '#f05742'], [recipe.b, 'B', '#3b82f6']].map(([doc, letter, color]) => `
-            <div class="rounded-xl border-2 border-dashed p-5 text-center transition cursor-pointer hover:bg-gray-50" style="border-color:${color}55" data-action="toast" data-msg="${esc(doc.label)} attached">
-              <span class="inline-flex w-8 h-8 rounded-lg items-center justify-center text-white text-[12px] font-bold mb-2" style="background:${color}">${letter}</span>
-              <div class="text-[13px] font-bold">${esc(doc.label)}</div>
-              <div class="text-[11.5px] text-gray-400 mt-0.5">${doc.fields.length} fields expected</div>
-              <div class="mt-2.5 inline-flex items-center gap-1.5 text-[11.5px] font-semibold" style="color:${color}">
-                <i data-lucide="paperclip" class="w-3.5 h-3.5"></i>Drop file or click</div>
-            </div>`).join('')}
-        </div>
-      </div>
-
-      <div class="bg-white rounded-2xl border border-gray-100 shadow-sm p-5">
-        <div class="text-[13px] font-bold mb-1">3 · Matching rules</div>
-        <p class="text-[12px] text-gray-500 mb-3.5">Applied in order. Amount and date tolerances stop settlement lag from reading as a mismatch.</p>
-        <div class="overflow-x-auto rounded-xl border border-gray-200 mb-4">
-          <table class="dt w-full">
-            <thead class="bg-gray-50 border-b border-gray-200"><tr>
-              <th class="text-left px-4 py-2.5">${esc(recipe.a.label)}</th><th class="px-2 py-2.5"></th>
-              <th class="text-left px-4 py-2.5">${esc(recipe.b.label)}</th>
-              <th class="text-left px-4 py-2.5">Match type</th><th class="text-left px-4 py-2.5">Tolerance</th></tr></thead>
-            <tbody class="divide-y divide-gray-50">
-              ${recipe.map.map(m => `<tr>
-                <td class="px-4 py-2.5 font-medium">${esc(m.a)}</td>
-                <td class="px-2 py-2.5 text-center text-gray-300"><i data-lucide="arrow-right" class="w-3.5 h-3.5 inline"></i></td>
-                <td class="px-4 py-2.5 font-medium">${esc(m.b)}</td>
-                <td class="px-4 py-2.5">${pill(esc(m.type), m.type === 'Exact' ? 'green' : m.type.startsWith('Date') ? 'blue' : m.type.startsWith('Fuzzy') ? 'purple' : 'amber')}</td>
-                <td class="px-4 py-2.5 text-gray-500 font-mono text-[11.5px]">${esc(m.tol || '—')}</td></tr>`).join('')}
-            </tbody></table>
-        </div>
-        <button class="btn-primary" data-recon-run><i data-lucide="play" class="w-4 h-4"></i>Run reconciliation</button>
-      </div>
-    `);
-  }
-
-  return page(`
-    <div class="flex items-center gap-1.5 text-[12px] text-gray-400 mb-4">
-      <button class="hover:text-[#f05742] font-medium" data-recon-back>Reconciliation</button>
-      <i data-lucide="chevron-right" class="w-3 h-3"></i><span class="text-gray-600 font-medium">${esc(recipe.industry)} · ${esc(recipe.a.label)} ↔ ${esc(recipe.b.label)}</span>
-    </div>
-
-    ${pageHeader('arrow-left-right','Reconciliation Result','Run rec_8f21c4 · 18 Aug 2026 · matched with a ± ' + recipe.tolDays + ' day settlement window.',
-      `<button class="btn-secondary" data-action="toast" data-msg="Exception report exported as CSV"><i data-lucide="download" class="w-4 h-4"></i>Export CSV</button>
-       <button class="btn-secondary" data-action="toast" data-msg="Full result exported as JSON"><i data-lucide="braces" class="w-4 h-4"></i>Export JSON</button>
-       <button class="btn-primary" data-recon-back><i data-lucide="rotate-cw" class="w-4 h-4"></i>New run</button>`)}
-
-    <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 mb-5">
-      ${[['Records read', RECON_ROWS.length, 'file-text', '#6b7280'],
-         ['Auto matched', counts.matched || 0, 'check-circle', '#10b981'],
-         ['Discrepant', counts.discrepant || 0, 'alert-triangle', '#f59e0b'],
-         ['Needs review', counts.review || 0, 'user-check', '#f97316'],
-         ['Unmatched', counts.unmatched || 0, 'x-circle', '#ef4444'],
-         ['Net variance', sgd(Math.abs(variance)), 'scale', '#f05742']]
-        .map(([label, val, icon, color]) => `
-        <div class="bg-white rounded-xl border border-gray-100 shadow-sm p-4">
-          <div class="flex items-center gap-1.5" style="color:${color}"><i data-lucide="${icon}" class="w-3.5 h-3.5"></i>
-            <span class="text-[10px] font-bold uppercase tracking-wider">${label}</span></div>
-          <div class="text-[20px] font-bold mt-1.5 leading-none">${val}</div></div>`).join('')}
-    </div>
-
-    <div class="rounded-2xl border border-[#f05742]/20 bg-gradient-to-r from-[#f05742]/[.06] via-white to-white p-4 mb-5 flex items-center gap-5 flex-wrap">
-      <div class="flex items-center gap-2.5">
-        <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-[#f05742] to-[#ff6b58] flex items-center justify-center shrink-0">
-          <i data-lucide="zap" class="w-5 h-5 text-white"></i></div>
-        <div><div class="text-[10px] uppercase tracking-wider font-bold text-gray-400">Auto-match rate</div>
-          <div class="text-[20px] font-bold leading-tight">${autoPct}%<span class="text-[12px] font-medium text-gray-400 ml-2">${counts.matched} of ${RECON_ROWS.length} reconciled with no human touch</span></div></div>
-      </div>
-      <div class="h-9 w-px bg-gray-200 hidden md:block"></div>
-      <div class="text-[12px] text-gray-600 flex-1 min-w-[280px] leading-relaxed">
-        ${(counts.discrepant || 0) + (counts.review || 0) + (counts.unmatched || 0)} rows need a person. Without the ± ${recipe.tolDays} day window, ${RECON_ROWS.filter(r => r.status === 'matched' && r.dateA !== r.dateB).length} of the matched rows would have been reported as unmatched.
-      </div>
-      ${pill('<i data-lucide="calendar-clock" class="w-3 h-3"></i>± ' + recipe.tolDays + ' day tolerance', 'blue')}
-    </div>
-
-    ${card(`
-      <div class="px-5 py-3.5 border-b border-gray-100 flex items-center gap-2 flex-wrap">
-        <span class="text-[12.5px] font-bold mr-2">Filter</span>
-        ${['All', ...Object.keys(RECON_STATUS).map(k => RECON_STATUS[k].label)].map((l, i) =>
-          `<button class="px-3 py-1 rounded-full text-[11.5px] font-semibold border transition ${i === 0 ? 'bg-[#f05742] text-white border-[#f05742]' : 'bg-white border-gray-200 text-gray-600 hover:border-gray-300'}">${l}</button>`).join('')}
-      </div>
-      <div class="overflow-x-auto">
-        <table class="dt w-full" style="min-width:1120px">
-          <thead class="bg-gray-50/80 border-b border-gray-100">
-            <tr>
-              <th colspan="3" class="text-left px-4 py-2 border-r border-gray-200 bg-[#f05742]/[.05]">
-                <span class="text-[#f05742]">A · ${esc(recipe.a.label)}</span></th>
-              <th colspan="3" class="text-left px-4 py-2 border-r border-gray-200 bg-blue-50">
-                <span class="text-blue-600">B · ${esc(recipe.b.label)}</span></th>
-              <th colspan="3" class="text-left px-4 py-2">Result</th>
-            </tr>
-            <tr>
-              <th class="text-left px-4 py-2.5">Txn ID</th><th class="text-left px-4 py-2.5">Date</th><th class="text-right px-4 py-2.5 border-r border-gray-200">Amount</th>
-              <th class="text-left px-4 py-2.5">Reference</th><th class="text-left px-4 py-2.5">Date</th><th class="text-right px-4 py-2.5 border-r border-gray-200">Amount</th>
-              <th class="text-left px-4 py-2.5 w-36">Status</th><th class="text-left px-4 py-2.5 w-20">Conf.</th><th class="text-left px-4 py-2.5">Why</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-gray-50">
-            ${RECON_ROWS.map(r => {
-              const st = RECON_STATUS[r.status];
-              const amtMismatch = r.amtA != null && r.amtB != null && Math.abs(r.amtA - r.amtB) > 0.001;
-              const dateShift = r.dateA && r.dateB && r.dateA !== r.dateB;
-              const missA = r.amtA == null, missB = r.amtB == null;
-              return `<tr class="${r.status === 'unmatched' ? 'bg-red-50/40' : r.status === 'discrepant' ? 'bg-amber-50/40' : r.status === 'review' ? 'bg-orange-50/30' : ''}">
-                <td class="px-4 py-2.5 font-mono text-[11.5px] ${missA ? 'text-gray-300' : ''}">${esc(r.id)}</td>
-                <td class="px-4 py-2.5 text-[11.5px] ${missA ? 'text-gray-300' : 'text-gray-600'}">${r.dateA || '—'}</td>
-                <td class="px-4 py-2.5 text-right font-mono text-[11.5px] border-r border-gray-100 ${missA ? 'text-gray-300' : amtMismatch ? 'bg-amber-100 font-bold rounded' : ''}">${r.amtA != null ? r.amtA.toFixed(2) : '—'}</td>
-                <td class="px-4 py-2.5 font-mono text-[11.5px] ${missB ? 'text-gray-300' : r.status === 'review' ? 'bg-orange-100 rounded font-semibold' : ''}">${esc(r.refB || '—')}</td>
-                <td class="px-4 py-2.5 text-[11.5px] ${missB ? 'text-gray-300' : dateShift ? 'text-blue-600 font-semibold' : 'text-gray-600'}">${r.dateB || '—'}</td>
-                <td class="px-4 py-2.5 text-right font-mono text-[11.5px] border-r border-gray-100 ${missB ? 'text-gray-300' : amtMismatch ? 'bg-amber-100 font-bold rounded' : ''}">${r.amtB != null ? r.amtB.toFixed(2) : '—'}</td>
-                <td class="px-4 py-2.5"><span class="chip border ${st.cls}"><i data-lucide="${st.icon}" class="w-3 h-3"></i>${st.label}</span></td>
-                <td class="px-4 py-2.5 font-mono text-[11.5px] ${r.conf != null && r.conf < 0.85 ? 'text-orange-600 font-bold' : 'text-gray-500'}">${r.conf != null ? (r.conf * 100).toFixed(0) + '%' : '—'}</td>
-                <td class="px-4 py-2.5 text-[11.5px] text-gray-600 max-w-[280px]"><div class="line-clamp-2">${esc(r.note)}</div></td>
-              </tr>`;
-            }).join('')}
-          </tbody>
-          <tfoot class="border-t-2 border-gray-100 bg-gray-50/60">
-            <tr class="font-bold">
-              <td colspan="2" class="px-4 py-3 text-[12px]">Totals</td>
-              <td class="px-4 py-3 text-right font-mono text-[12px] border-r border-gray-200">${totalA.toFixed(2)}</td>
-              <td colspan="2" class="px-4 py-3"></td>
-              <td class="px-4 py-3 text-right font-mono text-[12px] border-r border-gray-200">${totalB.toFixed(2)}</td>
-              <td colspan="3" class="px-4 py-3 text-[12px]">Variance <span class="font-mono text-[#f05742]">${variance >= 0 ? '+' : ''}${variance.toFixed(2)}</span></td>
-            </tr>
-          </tfoot>
-        </table>
-      </div>`)}
-
-    <div class="mt-5 rounded-2xl border border-blue-200 bg-blue-50 p-4 flex gap-3">
-      <i data-lucide="info" class="w-4 h-4 text-blue-500 shrink-0 mt-0.5"></i>
-      <div class="text-[12px] text-blue-900 leading-relaxed">
-        <b>Scope note.</b> This module is document-in, document-out: it reads two files, classifies every record and produces an exception report. It deliberately does not keep a running ledger, a customer master or ageing — that is an accounts-receivable application, a separate product decision.
-      </div>
-    </div>
-  `);
-};
-
-AFTER['/reconciliation'] = () => {
-  $('#screen').addEventListener('click', (e) => {
-    const r = e.target.closest('[data-recon-recipe]');
-    if (r) { STATE.reconRecipe = r.getAttribute('data-recon-recipe'); router(); return; }
-    if (e.target.closest('[data-recon-run]')) { STATE.reconRun = true; router(); toast('Reconciliation complete — 12 records classified', 'brand'); return; }
-    if (e.target.closest('[data-recon-back]')) { STATE.reconRun = false; router(); }
-  });
-};
-
+/* The reconciliation workbench now lives inside the reconciliation agent's
+   workspace (#/agent/:id/workbench). RECON_STATUS above is still used there. */
 /* ================================================================
    CONNECTORS
    ================================================================ */
@@ -4450,7 +5234,7 @@ SCREENS['/analytics'] = () => {
   const total = days.reduce((s, d) => s + d.total, 0);
   const failed = days.reduce((s, d) => s + d.failed, 0);
   const review = days.reduce((s, d) => s + d.review, 0);
-  const stp = +((total - failed - review) / total * 100).toFixed(1);
+  const stp = ((total - failed - review) / total * 100).toFixed(1);
 
   const perAgent = AGENTS.filter(a => a.status === 'published').map(a => {
     const runs = RUNS.filter(r => r.agentId === a.id).length * 47 + between(120, 380);
@@ -4483,7 +5267,7 @@ SCREENS['/analytics'] = () => {
     <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-5">
       ${kpi('Total runs', num(total), 'Across ' + perAgent.length + ' published agents', 'activity', '#f05742', '+12.4%')}
       ${kpi('Straight-through rate', stp + '%', 'Finished with zero human touch', 'zap', '#10b981', '+3.1%')}
-      ${kpi('Human touch rate', +(review / total * 100).toFixed(1) + '%', num(review) + ' runs needed a reviewer', 'user-check', '#f59e0b', '-2.8%')}
+      ${kpi('Human touch rate', (review / total * 100).toFixed(1) + '%', num(review) + ' runs needed a reviewer', 'user-check', '#f59e0b', '-2.8%')}
       ${kpi('Cost per run', money(STATS.credits30 / STATS.total30 * 0.01), 'Blended across all model configs', 'coins', '#3b82f6', '-6.2%')}
     </div>
 
